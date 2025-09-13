@@ -1,0 +1,5 @@
+name: ARCRootFinding
+version: '1.0.0-SNAPSHOT'
+main: kr.arcadia.aRCRootFinding.ARCRootFinding
+api-version: '1.21'
+load: STARTUP
