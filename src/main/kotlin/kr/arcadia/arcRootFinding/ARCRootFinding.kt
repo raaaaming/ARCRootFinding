@@ -2,22 +2,32 @@ package kr.arcadia.arcRootFinding
 
 import com.mojang.brigadier.Command
 import com.mojang.brigadier.arguments.DoubleArgumentType
+import com.mojang.brigadier.builder.LiteralArgumentBuilder
+import com.mojang.brigadier.tree.LiteralCommandNode
+import io.papermc.paper.command.brigadier.CommandSourceStack
 import io.papermc.paper.command.brigadier.Commands
+import io.papermc.paper.plugin.lifecycle.event.types.LifecycleEvents
+import kr.arcadia.arcRootFinding.core.DynamicCCHPathfinder
 import kr.arcadia.core.bukkit.ARCBukkitPlugin
-import org.bukkit.FluidCollisionMode
 import org.bukkit.Location
 import org.bukkit.entity.Player
+import org.bukkit.scheduler.BukkitRunnable
 
 class ARCRootFinding : ARCBukkitPlugin() {
 
-    override fun onPostEnable() {
+    private lateinit var pathfinder: DynamicCCHPathfinder
 
+    override fun onPostLoad() {
+        pathfinder = DynamicCCHPathfinder(this)
     }
 
-    override fun onPreDisable() {
+    override fun onPreEnable() {
+        lifecycleManager.registerEventHandler(LifecycleEvents.COMMANDS) { command ->
+            command.registrar().register(buildCommand)
+        }
     }
 
-    val buildCommand = Commands.literal("arcrootfinding")
+    val buildCommand: LiteralCommandNode<CommandSourceStack> = LiteralArgumentBuilder.literal<CommandSourceStack>("arcrootfinding")
         .then(Commands.literal("test")
             .then(Commands.argument("destination's X", DoubleArgumentType.doubleArg())
                 .then(Commands.argument("destination's Y", DoubleArgumentType.doubleArg())
@@ -27,20 +37,38 @@ class ARCRootFinding : ARCBukkitPlugin() {
                             val y = DoubleArgumentType.getDouble(ctx, "destination's Y")
                             val z = DoubleArgumentType.getDouble(ctx, "destination's Z")
                             val start = ctx.source.location
-                            val destination = Location(ctx.source.location.world, x, y, z)
+                            val world = start.world
+                            val destination = Location(world, x, y, z)
                             val sender = (ctx.source.sender as Player)
-                            var goVec = destination.subtract(start).toVector().normalize()
-                            val rayTrace = sender.rayTraceBlocks(3.0, FluidCollisionMode.SOURCE_ONLY)
-                            if(rayTrace?.hitBlock == null) {
-                                sender.sendMessage("No block was hit.")
-                                return@executes Command.SINGLE_SUCCESS
+
+                            sender.sendMessage("경로 탐색을 시작합니다...")
+
+                            pathfinder.findPathAsync(start, destination).thenAccept { path ->
+                                if (path != null) {
+                                    sender.sendMessage("§a경로를 찾았습니다! 길이: ${path.size} 블록")
+
+                                    // 경로를 파티클로 표시 (선택사항)
+                                    object : BukkitRunnable() {
+                                        override fun run() {
+                                            path.forEach { loc ->
+                                                world.spawnParticle(
+                                                    org.bukkit.Particle.FLAME,
+                                                    loc.add(0.0, 1.0, 0.0),
+                                                    1
+                                                )
+                                            }
+                                        }
+                                    }.runTaskLater(this, 0L)
+
+                                } else {
+                                    sender.sendMessage("§c경로를 찾을 수 없습니다.")
+                                }
                             }
-                            val blockVec = rayTrace.hitPosition.subtract(start.toVector()).normalize()
-                            goVec = blockVec.subtract(goVec).normalize() //TODO how to rotate my goVec for avoiding this obstacle?
+
                             return@executes Command.SINGLE_SUCCESS
                         }
                     )
                 )
             )
-        )
+        ).build()
 }

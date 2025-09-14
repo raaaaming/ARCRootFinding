@@ -1,1 +1,1 @@
-rootProject.name = "ARCRootFinding"
+rootProject.name = "ARCPathFinding"
