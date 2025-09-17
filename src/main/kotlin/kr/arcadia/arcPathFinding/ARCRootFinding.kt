@@ -37,7 +37,7 @@ import java.util.UUID
 class ARCRootFinding : ARCBukkitPlugin() {
 
     private lateinit var worldGraph: NavWorldGraph
-    private lateinit var index: CCHIndex
+    private lateinit var cchIndex: CCHIndex
     private lateinit var engine: QueryEngine
     private lateinit var snap: ChunkSpatialIndex
 
@@ -89,20 +89,20 @@ class ARCRootFinding : ARCBukkitPlugin() {
         println("전체 로드") //클리어
 
         val (order, _) = buildOrderByChunkSeparatorFast(worldGraph, sepThickness = 4) // ★ 두께 2~3 추천
-        var index = contractUltra(worldGraph, order, policy)                        // ★ 빠른 수축
+        val contractedIndex = contractUltra(worldGraph, order, policy)                        // ★ 빠른 수축
 
         println("병합 → CCH 수축") //클리어
 
         val attrs = buildNodeAttrs(worldGraph, bq)
         val weightFn = makeAttrWeightFn(attrs, WeightPolicy(nightMultiplier = 1.0))
-        customizeWeightsPerfectFast(index, worldGraph, weightFn)
-        customizeUpperTrianglePass(index) // (선택) 1회 추가 패스
+        customizeWeightsPerfectFast(contractedIndex, worldGraph, weightFn)
+        customizeUpperTrianglePass(contractedIndex) // (선택) 1회 추가 패스
 
         println("커스터마이즈") //클리어
 
         // CCH 인덱스 저장/로드(선택)
-        writeIndex(cchPath, index)
-        index = readIndex(cchPath)
+        writeIndex(cchPath, contractedIndex)
+        cchIndex = readIndex(cchPath)
 
         println("CCH 인덱스 저장/로드") //클리어
 
@@ -112,7 +112,7 @@ class ARCRootFinding : ARCBukkitPlugin() {
         println("빠른 스냅 인덱스") //클리어
 
         // ---- 질의 엔진 ----
-        engine = QueryEngine(worldGraph, index)
+        engine = QueryEngine(worldGraph, cchIndex)
 
         println("질의 엔진") //클리어
     }
@@ -163,6 +163,19 @@ class ARCRootFinding : ARCBukkitPlugin() {
                     )
                 )
             )
+        )
+        .then(Commands.literal("dumpNodes")
+            .executes { ctx ->
+                val sender = ctx.source.sender
+                if (!::snap.isInitialized) {
+                    sender.sendMessage("스냅 인덱스가 아직 초기화되지 않았습니다.")
+                    return@executes Command.SINGLE_SUCCESS
+                }
+
+                val lines = snap.dumpAllNodes { _ -> }
+                lines.forEach { line -> sender.sendMessage(line) }
+                return@executes Command.SINGLE_SUCCESS
+            }
         )
         .build()
 }
