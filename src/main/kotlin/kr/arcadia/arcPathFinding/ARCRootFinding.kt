@@ -85,20 +85,29 @@ class ARCRootFinding : ARCBukkitPlugin() {
         val (order, _) = buildOrderByChunkSeparatorFast(worldGraph, sepThickness = 4) // ★ 두께 2~3 추천
         val contractedIndex = contractUltra(worldGraph, order, policy)                        // ★ 빠른 수축
 
+        println("병합 → CCH 수축") //클리어
+
         val attrs = buildNodeAttrs(worldGraph, bq)
         val weightFn = makeAttrWeightFn(attrs, WeightPolicy(nightMultiplier = 1.0))
         customizeWeightsPerfectFast(contractedIndex, worldGraph, weightFn)
         customizeUpperTrianglePass(contractedIndex) // (선택) 1회 추가 패스
 
+
         // CCH 인덱스 저장/로드(선택)
         writeIndex(cchPath, contractedIndex)
         cchIndex = readIndex(cchPath)
+
+        println("CCH 인덱스 저장/로드") //클리어
+
 
         // ---- 빠른 스냅 인덱스 ----
         snap = ChunkSpatialIndex(worldGraph)
 
         // ---- 질의 엔진 ----
         engine = QueryEngine(worldGraph, cchIndex)
+
+        println("질의 엔진") //클리어
+
     }
 
     val buildCommand: LiteralCommandNode<CommandSourceStack> = LiteralArgumentBuilder.literal<CommandSourceStack>("apf")
@@ -157,7 +166,9 @@ class ARCRootFinding : ARCBukkitPlugin() {
                 }
 
                 val lines = snap.dumpAllNodes { _ -> }
+                
                 lines.forEach { line -> println(line) }
+                
                 return@executes Command.SINGLE_SUCCESS
             }
         )
