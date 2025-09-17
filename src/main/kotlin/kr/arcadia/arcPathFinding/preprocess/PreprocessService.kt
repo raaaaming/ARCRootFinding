@@ -20,50 +20,46 @@ class PreprocessService(
     ): List<NavChunk> {
         val out = ArrayList<NavChunk>()
         val c0x = Math.floorDiv(x0, 16); val c0z = Math.floorDiv(z0, 16)
-        // 나선형 순회
+        val policyHash = policy.hash()
+
+        fun rebuildIfChanged(cx:Int, cz:Int) {
+            val pos = ChunkPos(cx, cz)
+            val mask = NavChunkBuilder.computeStandableMask(bq, pos, yMin, yMax)
+            val crc = mask.crc32()
+            val cur = ChunkSig(cx, cz, yMin, yMax, policyHash, crc)
+            val old = existing.get(cx, cz)
+            if (old == null || old != cur) {
+                val ch = NavChunkBuilder.buildFromMask(bq, pos, mask, policy)
+                out.add(ch)
+                existing.put(cur)
+            }
+        }
+
         var r = 0
-        loop@ while (r <= radiusChunks) {
+        while (r <= radiusChunks) {
             var x = -r
             while (x <= r) {
-                val ring = listOf(
-                    c0x + x to c0z - r,
-                    c0x + x to c0z + r
-                )
-                for ((cx, cz) in ring) {
-                    if (Math.abs(cx - c0x) > r || Math.abs(cz - c0z) > r) continue
-                    if (r == 0 && (cx != c0x || cz != c0z)) continue
-                    // 시그니처 비교
-                    val mask = NavChunkBuilder.computeStandableMask(bq, ChunkPos(cx,cz), yMin, yMax)
-                    val crc = mask.crc32()
-                    val old = existing.get(cx, cz)
-                    val cur = ChunkSig(cx, cz, yMin, yMax, policy.hash(), crc)
-                    if (old == null || old != cur) {
-                        val ch = NavChunkBuilder.buildFromMask(bq, ChunkPos(cx,cz), mask, policy)
-                        out.add(ch)
-                        existing.put(cur)
+                val cx = c0x + x
+                val northZ = c0z - r
+                val southZ = c0z + r
+                if (Math.abs(cx - c0x) <= r) {
+                    if (r == 0) {
+                        rebuildIfChanged(cx, northZ)
+                    } else {
+                        rebuildIfChanged(cx, northZ)
+                        rebuildIfChanged(cx, southZ)
                     }
                 }
                 x++
             }
-            // 좌/우 변
-            var z = -r+1
-            while (z <= r-1) {
-                val ring = listOf(
-                    c0x - r to c0z + z,
-                    c0x + r to c0z + z
-                )
-                for ((cx, cz) in ring) {
-                    val mask = NavChunkBuilder.computeStandableMask(bq, ChunkPos(cx,cz), yMin, yMax)
-                    val crc = mask.crc32()
-                    val old = existing.get(cx, cz)
-                    val cur = ChunkSig(cx, cz, yMin, yMax, policy.hash(), crc)
-                    if (old == null || old != cur) {
-                        val ch = NavChunkBuilder.buildFromMask(bq, ChunkPos(cx,cz), mask, policy)
-                        out.add(ch)
-                        existing.put(cur)
-                    }
+            if (r > 0) {
+                var z = -r + 1
+                while (z <= r - 1) {
+                    val cz = c0z + z
+                    rebuildIfChanged(c0x - r, cz)
+                    rebuildIfChanged(c0x + r, cz)
+                    z++
                 }
-                z++
             }
             r++
         }
