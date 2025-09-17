@@ -8,31 +8,6 @@ open class QueryEngine(
     open val g: NavWorldGraph,
     open val idx: CCHIndex
 ) {
-    // --------- Reverse Upward (전치 그래프) 준비 ---------
-    val revOff: IntArray
-    val revTo: IntArray
-    init {
-        val n = g.nodeCount
-        val off = idx.upOff; val to = idx.upTo
-        val deg = IntArray(n)
-        for (u in 0 until n) {
-            var i = off[u]; val e = off[u+1]
-            while (i < e) { deg[to[i]]++; i++ }
-        }
-        revOff = IntArray(n+1)
-        for (i in 0 until n) revOff[i+1] = revOff[i] + deg[i]
-        revTo = IntArray(revOff[n])
-        val cur = IntArray(n) { revOff[it] }
-        for (u in 0 until n) {
-            var i = off[u]; val e = off[u+1]
-            while (i < e) {
-                val v = to[i]
-                revTo[cur[v]++] = u
-                i++
-            }
-        }
-    }
-
     // --------- (옵션) 브루트 최근접 스냅 ---------
     fun nearestNode(x:Int,y:Int,z:Int): Int {
         var best = -1; var bestD = Long.MAX_VALUE
@@ -105,7 +80,7 @@ open class QueryEngine(
         var best = INF
         var meet = -1
 
-        // 양방향 다익스트라 (Forward=Upward / Backward=Reverse-Upward)
+        // 양방향 다익스트라 (Forward=Upward / Backward=Upward from target)
         while (pqF.isNotEmpty() || pqB.isNotEmpty()) {
             if (pqF.isNotEmpty()) {
                 val cur = pqF.poll()
@@ -130,11 +105,10 @@ open class QueryEngine(
                 if (cur.d == distB[cur.u]) {
                     val u = cur.u
                     if (distF[u] + distB[u] < best) { best = distF[u] + distB[u]; meet = u }
-                    var i = revOff[u]; val e = revOff[u+1]
+                    var i = idx.upOff[u]; val e = idx.upOff[u+1]
                     while (i < e) {
-                        val v = revTo[i] // reverse upward에서 v -> u 이면, 원래 upward는 v -> u
-                        val eid = edgeIndex(v, u)
-                        val w = if (eid >= 0) idx.upW[eid] else INF
+                        val v = idx.upTo[i]
+                        val w = idx.upW[i]
                         if (w < INF && distB[v] > distB[u] + w) {
                             distB[v] = distB[u] + w
                             prevB[v] = u
