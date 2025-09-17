@@ -64,10 +64,8 @@ class ARCRootFinding : ARCBukkitPlugin() {
         val sigCache = ChunkSigCache().apply { load(sigPath) }
         val center = w.spawnLocation
         val yMin = 40; val yMax = 140
-        val changed: List<NavChunk> = pre.preprocessRadius(center.blockX, center.blockZ, radiusChunks = 1, yMin, yMax, sigCache)
+        val changed: List<NavChunk> = pre.preprocessRadius(center.blockX, center.blockZ, radiusChunks = 50, yMin, yMax, sigCache)
         sigCache.save(sigPath)
-
-        println("M6")
 
         // ---- M5 WNM 저장소: 기존 + 변경분 병합 저장 ----
         val store = WNMStore()
@@ -80,13 +78,9 @@ class ARCRootFinding : ARCBukkitPlugin() {
         )
         store.appendOrPatch(wnmPath, header, changed)
 
-        println("M5") //5분 정도...
-
         // ---- 전체 로드 → 병합 → CCH 수축 → 커스터마이즈 ----
         val (_, chunks) = store.readAll(wnmPath)
         worldGraph = mergeChunks(chunks, policy)
-
-        println("전체 로드") //클리어
 
         val (order, _) = buildOrderByChunkSeparatorFast(worldGraph, sepThickness = 4) // ★ 두께 2~3 추천
         val contractedIndex = contractUltra(worldGraph, order, policy)                        // ★ 빠른 수축
@@ -98,7 +92,6 @@ class ARCRootFinding : ARCBukkitPlugin() {
         customizeWeightsPerfectFast(contractedIndex, worldGraph, weightFn)
         customizeUpperTrianglePass(contractedIndex) // (선택) 1회 추가 패스
 
-        println("커스터마이즈") //클리어
 
         // CCH 인덱스 저장/로드(선택)
         writeIndex(cchPath, contractedIndex)
@@ -106,15 +99,15 @@ class ARCRootFinding : ARCBukkitPlugin() {
 
         println("CCH 인덱스 저장/로드") //클리어
 
+
         // ---- 빠른 스냅 인덱스 ----
         snap = ChunkSpatialIndex(worldGraph)
-
-        println("빠른 스냅 인덱스") //클리어
 
         // ---- 질의 엔진 ----
         engine = QueryEngine(worldGraph, cchIndex)
 
         println("질의 엔진") //클리어
+
     }
 
     val buildCommand: LiteralCommandNode<CommandSourceStack> = LiteralArgumentBuilder.literal<CommandSourceStack>("apf")
@@ -173,7 +166,9 @@ class ARCRootFinding : ARCBukkitPlugin() {
                 }
 
                 val lines = snap.dumpAllNodes { _ -> }
-                lines.forEach { line -> sender.sendMessage(line) }
+                
+                lines.forEach { line -> println(line) }
+                
                 return@executes Command.SINGLE_SUCCESS
             }
         )
