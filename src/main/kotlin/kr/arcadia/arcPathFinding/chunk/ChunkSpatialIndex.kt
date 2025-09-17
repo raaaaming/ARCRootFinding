@@ -21,17 +21,26 @@ class ChunkSpatialIndex(
 
     /** 중심 청크에서 시작해 반경 r까지 확장하며 최근접 노드 탐색 */
     fun nearestNode(x:Int, y:Int, z:Int, maxRadius:Int = 3): Int {
+        if (map.isEmpty()) return -1
+
         val cx0 = floorDiv(x, chunkSize); val cz0 = floorDiv(z, chunkSize)
         var best = -1; var bestD = Long.MAX_VALUE
 
+        fun consider(nodeId:Int) {
+            val dx = (g.nodeX(nodeId) - x).toLong()
+            val dy = (g.nodeY(nodeId) - y).toLong()
+            val dz = (g.nodeZ(nodeId) - z).toLong()
+            val d2 = dx * dx + dy * dy + dz * dz
+            if (d2 < bestD) {
+                bestD = d2
+                best = nodeId
+            }
+        }
+
         fun scanChunk(cx:Int, cz:Int) {
-            val arr = map[ChunkKey(cx,cz)] ?: return
+            val arr = map[ChunkKey(cx, cz)] ?: return
             for (u in arr) {
-                val dx = (g.nodeX(u)-x).toLong()
-                val dy = (g.nodeY(u)-y).toLong()
-                val dz = (g.nodeZ(u)-z).toLong()
-                val d2 = dx*dx + dy*dy + dz*dz
-                if (d2 < bestD) { bestD = d2; best = u }
+                consider(u)
             }
         }
 
@@ -39,11 +48,24 @@ class ChunkSpatialIndex(
         var r = 0
         while (r <= maxRadius) {
             // 위/아래 변
-            for (cx in cx0-r..cx0+r) { scanChunk(cx, cz0-r); if (r>0) scanChunk(cx, cz0+r) }
+            for (cx in cx0 - r..cx0 + r) {
+                scanChunk(cx, cz0 - r)
+                if (r > 0) scanChunk(cx, cz0 + r)
+            }
             // 좌/우 변
-            for (cz in cz0-r+1..<cz0+r) { if (r>0) { scanChunk(cx0-r, cz); scanChunk(cx0+r, cz) } }
-            if (best != -1) break
+            if (r > 0) {
+                for (cz in cz0 - r + 1..<cz0 + r) {
+                    scanChunk(cx0 - r, cz)
+                    scanChunk(cx0 + r, cz)
+                }
+            }
+            if (best != -1) return best
             r++
+        }
+
+        // 반경 내에서 찾지 못한 경우 → 전체 그래프 브루트 포스 fallback
+        for (u in 0 until g.nodeCount) {
+            consider(u)
         }
         return best
     }
