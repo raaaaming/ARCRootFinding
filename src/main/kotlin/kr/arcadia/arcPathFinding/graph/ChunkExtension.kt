@@ -1,12 +1,23 @@
 package kr.arcadia.arcPathFinding.graph
 
 import kr.arcadia.arcPathFinding.chunk.NavChunk
+import kr.arcadia.arcPathFinding.policy.MovePolicy
 import kr.arcadia.arcPathFinding.util.IntArrayList
-import kotlin.math.abs
 
 private fun keyXZ(x:Int, z:Int): Long = (x.toLong() shl 32) xor (z.toLong() and 0xFFFFFFFFL)
 
-fun mergeChunks(chunks: List<NavChunk>): NavWorldGraph {
+fun mergeChunks(chunks: List<NavChunk>, policy: MovePolicy): NavWorldGraph {
+
+    fun pickBestY(uy:Int, ys:IntArray, stepUp:Int, maxDrop:Int): Int? {
+        if (ys.isEmpty()) return null
+        val seen = java.util.HashSet<Int>(ys.size)
+        for (v in ys) seen.add(v)
+        if (seen.contains(uy)) return uy
+        for (d in 1..stepUp) if (seen.contains(uy + d)) return uy + d
+        for (d in 1..maxDrop) if (seen.contains(uy - d)) return uy - d
+        return null
+    }
+
     if (chunks.isEmpty()) return NavWorldGraph(0, IntArray(0), IntArray(0), IntArray(1){0}, IntArray(0))
 
     // 0) 청크 인덱스 맵 (cx,cz) -> idx
@@ -50,129 +61,108 @@ fun mergeChunks(chunks: List<NavChunk>): NavWorldGraph {
         }
     }
 
-    // 3-2) 경계(게이트) 교차 간선
-    //
-    // 규칙(스켈레톤 단순판):
-    // - 인접 청크의 대응 경계와 (x,z)가 1칸 차이(상대 경계 좌표)이며
-    // - |Δy| <= 1 이면 연결 (양방향)
-    // (더 큰 낙하는 각 청크 내부 그래프에서 이미 처리된다고 가정)
-    //
-    // 게이트 빠른 매칭을 위해 이웃 청크마다 (x,z)->localNode 리스트 인덱스를 만든다.
+    // 3-2) 경계(게이트) 교차 간선 — ★ y상승/하강/대각까지 열어줌
     data class GateIndex(val byXZ: MutableMap<Long, MutableList<Int>>)
     fun buildGateIndex(ch: NavChunk, which: Char): GateIndex {
         val map = HashMap<Long, MutableList<Int>>()
         val nodes = when(which) {
-            'N' -> ch.gateN
-            'S' -> ch.gateS
-            'W' -> ch.gateW
-            else -> ch.gateE
+            'N' -> ch.gateN; 'S' -> ch.gateS; 'W' -> ch.gateW; else -> ch.gateE
         }
         for (uLocal in nodes) {
             val x = ch.coords[uLocal*3]
             val z = ch.coords[uLocal*3+2]
-            val key = keyXZ(x, z)
-            map.computeIfAbsent(key){ mutableListOf() }.add(uLocal)
+            map.computeIfAbsent(keyXZ(x, z)) { mutableListOf() }.add(uLocal)
         }
         return GateIndex(map)
     }
-
-    // 이웃 청크의 게이트 인덱스 캐시
-    val gateCache = HashMap<Pair<Int,Char>, GateIndex>() // (chunkIdx, side) -> index
-
-    fun gateIndexOf(chunkIdx:Int, side:Char): GateIndex =
+    val gateCache = HashMap<Pair<Int,Char>, GateIndex>()
+    fun gateIndexOf(chunkIdx:Int, side:Char) =
         gateCache.getOrPut(chunkIdx to side) { buildGateIndex(chunks[chunkIdx], side) }
 
-    // 북/남, 서/동 쌍 매칭
+// 방향 후보(대각 허용 시 ±1 포함)
+    val dxCand = if (policy.allowDiag) intArrayOf(-1,0,1) else intArrayOf(0)
+    val dzCand = dxCand
+
     for (i in chunks.indices) {
-        val ch = chunks[i]
-        val base = offsets[i]
+        val A = chunks[i]
+        val baseA = offsets[i]
 
-        // ① 북쪽: 이웃은 (cx, cz-1), 현 z=minZ, 이웃 z=maxZ
-        idxOf[C(ch.pos.cx, ch.pos.cz - 1)]?.let { nIdx ->
-            val neighbor = chunks[nIdx]
-            // 이웃의 남쪽 게이트 인덱스(by x,z)
-            val gIdx = gateIndexOf(nIdx, 'S')
-            for (uLocal in ch.gateN) {
-                val ux = ch.coords[uLocal*3]
-                val uy = ch.coords[uLocal*3+1]
-                val uz = ch.coords[uLocal*3+2]   // == minZ
-                // 이웃 쪽 좌표는 (ux, uz-1)
-                val key = keyXZ(ux, uz - 1)
-                val candidates = gIdx.byXZ[key] ?: continue
-                for (vLocal in candidates) {
-                    val vy = neighbor.coords[vLocal*3+1]
-                    if (abs(vy - uy) <= 1) {
-                        val u = base + uLocal
-                        val v = offsets[nIdx] + vLocal
-                        nbr[u].add(v)
-                        nbr[v].add(u)
-                    }
+        // 북쪽: neighbor (cx, cz-1), A의 z=minZ → B의 z=maxZ
+        idxOf[C(A.pos.cx, A.pos.cz - 1)]?.let { idxB ->
+            val B = chunks[idxB]; val baseB = offsets[idxB]
+            val gB = gateIndexOf(idxB, 'S')
+            for (uLocal in A.gateN) {
+                val ux = A.coords[uLocal*3]; val uy = A.coords[uLocal*3+1]
+                val uz = A.coords[uLocal*3+2] // == minZ
+                val tz = uz - 1
+                for (dx in dxCand) {
+                    val key = keyXZ(ux + dx, tz)
+                    val cand = gB.byXZ[key] ?: continue
+                    val yList = IntArray(cand.size) { k -> B.coords[cand[k]*3 + 1] }
+                    val ty = pickBestY(uy, yList, policy.stepUp, policy.maxDrop) ?: continue
+                    val vLocal = cand.first { B.coords[it*3 + 1] == ty }
+                    val u = baseA + uLocal; val v = baseB + vLocal
+                    nbr[u].add(v); nbr[v].add(u)
                 }
             }
         }
 
-        // ② 남쪽: 이웃은 (cx, cz+1), 현 z=maxZ, 이웃 z=minZ
-        idxOf[C(ch.pos.cx, ch.pos.cz + 1)]?.let { sIdx ->
-            val neighbor = chunks[sIdx]
-            val gIdx = gateIndexOf(sIdx, 'N')
-            for (uLocal in ch.gateS) {
-                val ux = ch.coords[uLocal*3]
-                val uy = ch.coords[uLocal*3+1]
-                val uz = ch.coords[uLocal*3+2]   // == maxZ
-                val key = keyXZ(ux, uz + 1)
-                val candidates = gIdx.byXZ[key] ?: continue
-                for (vLocal in candidates) {
-                    val vy = neighbor.coords[vLocal*3+1]
-                    if (abs(vy - uy) <= 1) {
-                        val u = base + uLocal
-                        val v = offsets[sIdx] + vLocal
-                        nbr[u].add(v)
-                        nbr[v].add(u)
-                    }
+        // 남쪽: neighbor (cx, cz+1), A의 z=maxZ → B의 z=minZ
+        idxOf[C(A.pos.cx, A.pos.cz + 1)]?.let { idxB ->
+            val B = chunks[idxB]; val baseB = offsets[idxB]
+            val gB = gateIndexOf(idxB, 'N')
+            for (uLocal in A.gateS) {
+                val ux = A.coords[uLocal*3]; val uy = A.coords[uLocal*3+1]
+                val uz = A.coords[uLocal*3+2] // == maxZ
+                val tz = uz + 1
+                for (dx in dxCand) {
+                    val key = keyXZ(ux + dx, tz)
+                    val cand = gB.byXZ[key] ?: continue
+                    val yList = IntArray(cand.size) { k -> B.coords[cand[k]*3 + 1] }
+                    val ty = pickBestY(uy, yList, policy.stepUp, policy.maxDrop) ?: continue
+                    val vLocal = cand.first { B.coords[it*3 + 1] == ty }
+                    val u = baseA + uLocal; val v = baseB + vLocal
+                    nbr[u].add(v); nbr[v].add(u)
                 }
             }
         }
 
-        // ③ 서쪽: 이웃은 (cx-1, cz), 현 x=minX, 이웃 x=maxX
-        idxOf[C(ch.pos.cx - 1, ch.pos.cz)]?.let { wIdx ->
-            val neighbor = chunks[wIdx]
-            val gIdx = gateIndexOf(wIdx, 'E')
-            for (uLocal in ch.gateW) {
-                val ux = ch.coords[uLocal*3]
-                val uy = ch.coords[uLocal*3+1]
-                val uz = ch.coords[uLocal*3+2]   // == minX 열
-                val key = keyXZ(ux - 1, uz)
-                val candidates = gIdx.byXZ[key] ?: continue
-                for (vLocal in candidates) {
-                    val vy = neighbor.coords[vLocal*3+1]
-                    if (abs(vy - uy) <= 1) {
-                        val u = base + uLocal
-                        val v = offsets[wIdx] + vLocal
-                        nbr[u].add(v)
-                        nbr[v].add(u)
-                    }
+        // 서쪽: neighbor (cx-1, cz), A의 x=minX → B의 x=maxX
+        idxOf[C(A.pos.cx - 1, A.pos.cz)]?.let { idxB ->
+            val B = chunks[idxB]; val baseB = offsets[idxB]
+            val gB = gateIndexOf(idxB, 'E')
+            for (uLocal in A.gateW) {
+                val ux = A.coords[uLocal*3]; val uy = A.coords[uLocal*3+1]
+                val uz = A.coords[uLocal*3+2] // == minX 열
+                val tx = ux - 1
+                for (dz in dzCand) {
+                    val key = keyXZ(tx, uz + dz)
+                    val cand = gB.byXZ[key] ?: continue
+                    val yList = IntArray(cand.size) { k -> B.coords[cand[k]*3 + 1] }
+                    val ty = pickBestY(uy, yList, policy.stepUp, policy.maxDrop) ?: continue
+                    val vLocal = cand.first { B.coords[it*3 + 1] == ty }
+                    val u = baseA + uLocal; val v = baseB + vLocal
+                    nbr[u].add(v); nbr[v].add(u)
                 }
             }
         }
 
-        // ④ 동쪽: 이웃은 (cx+1, cz), 현 x=maxX, 이웃 x=minX
-        idxOf[C(ch.pos.cx + 1, ch.pos.cz)]?.let { eIdx ->
-            val neighbor = chunks[eIdx]
-            val gIdx = gateIndexOf(eIdx, 'W')
-            for (uLocal in ch.gateE) {
-                val ux = ch.coords[uLocal*3]
-                val uy = ch.coords[uLocal*3+1]
-                val uz = ch.coords[uLocal*3+2]   // == maxX 열
-                val key = keyXZ(ux + 1, uz)
-                val candidates = gIdx.byXZ[key] ?: continue
-                for (vLocal in candidates) {
-                    val vy = neighbor.coords[vLocal*3+1]
-                    if (abs(vy - uy) <= 1) {
-                        val u = base + uLocal
-                        val v = offsets[eIdx] + vLocal
-                        nbr[u].add(v)
-                        nbr[v].add(u)
-                    }
+        // 동쪽: neighbor (cx+1, cz), A의 x=maxX → B의 x=minX
+        idxOf[C(A.pos.cx + 1, A.pos.cz)]?.let { idxB ->
+            val B = chunks[idxB]; val baseB = offsets[idxB]
+            val gB = gateIndexOf(idxB, 'W')
+            for (uLocal in A.gateE) {
+                val ux = A.coords[uLocal*3]; val uy = A.coords[uLocal*3+1]
+                val uz = A.coords[uLocal*3+2] // == maxX 열
+                val tx = ux + 1
+                for (dz in dzCand) {
+                    val key = keyXZ(tx, uz + dz)
+                    val cand = gB.byXZ[key] ?: continue
+                    val yList = IntArray(cand.size) { k -> B.coords[cand[k]*3 + 1] }
+                    val ty = pickBestY(uy, yList, policy.stepUp, policy.maxDrop) ?: continue
+                    val vLocal = cand.first { B.coords[it*3 + 1] == ty }
+                    val u = baseA + uLocal; val v = baseB + vLocal
+                    nbr[u].add(v); nbr[v].add(u)
                 }
             }
         }

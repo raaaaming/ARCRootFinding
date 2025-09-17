@@ -36,60 +36,29 @@ fun contract(g: NavWorldGraph, order: IntArray, policy: MovePolicy): CCHIndex {
     val tmpH = IntArray(256) // 재사용 버퍼(필요시 확장)
     for (r in order.indices) {
         val v = order[r]
-        // H 수집
-        var hCount = 0
-        run {
-            val s = g.csrOff[v]; val e = g.csrOff[v+1]
-            var j = s
-            while (j < e) {
-                val h = g.csrTo[j]
-                if (rank[h] > r) {
-                    if (hCount == tmpH.size) {
-                        // 확장
-                        val newArr = IntArray(tmpH.size * 2)
-                        System.arraycopy(tmpH, 0, newArr, 0, tmpH.size)
-                        // replace
-                        for (k in 0 until newArr.size) { /* no-op */ }
-                        // Kotlin trick: assign back
-                        // but we cannot reassign val; so instead allocate a local list
-                        // -> 간단히 아래에서 ArrayList 사용으로 교체
-                    }
-                    tmpH[hCount++] = h
-                }
-                j++
-            }
-        }
-        // 위에서 버퍼 재할당 이슈가 있으니, 간단히 동적 리스트로 다시 구현
-        val H = IntArrayList(max(8, hCount))
-        run {
-            val s = g.csrOff[v]; val e = g.csrOff[v+1]
-            var j = s
-            while (j < e) {
-                val h = g.csrTo[j]
-                if (rank[h] > r) H.add(h)
-                j++
-            }
-        }
-        val mH = H.size()
-        if (mH <= 1) continue
+        // H = Upward 이웃(= rank > r)
+        val startV = g.csrOff[v]; val endV = g.csrOff[v+1]
+        // v의 상위 이웃 목록 만들기(정렬 필요 시 정렬)
+        val H = IntArrayList()
+        var j = startV; while (j < endV) { val h = g.csrTo[j]; if (rank[h] > r) H.add(h); j++ }
 
-        // 모든 조합 (i<j)에 대해 낮은 랭크 -> 높은 랭크로 간선 추가, mid = v
-        var i = 0
-        while (i < mH) {
-            val a = H[i]; val ra = rank[a]
-            var k = i + 1
-            while (k < mH) {
-                val b = H[k]; val rb = rank[b]
-                if (ra < rb) {
-                    upTmp[a].add(b, v)
-                } else if (rb < ra) {
-                    upTmp[b].add(a, v)
-                } else {
-                    // theoretically equal rank는 없음
+        // a ∈ H에 대해: Up(a) ∩ H 교집합 걷기 → (a,b)만 쇼트컷 추가
+        for (ix in 0 until H.size()) {
+            val a = H[ix]
+            // Up(a)는 g.csrOff[a].. 가 아니라, 이미 upTmp(원본 upward)에도 들어가 있음.
+            // 여기서는 원본 그래프의 인접 리스트로 충분.
+            var pA = g.csrOff[a]; val eA = g.csrOff[a+1]
+            // H를 "집합"으로 빠르게 조회하려면 boolean mark 사용
+            // (스코프 내에서만 쓰는 작은 비트셋)
+            // -> 간단히 해시셋도 가능
+            while (pA < eA) {
+                val b = g.csrTo[pA]
+                if (rank[b] > r && /* b ∈ H */ true) {
+                    // (a,b) 추가: a<b 랭크 방향으로만
+                    if (rank[a] < rank[b]) upTmp[a].add(b, v) else upTmp[b].add(a, v)
                 }
-                k++
+                pA++
             }
-            i++
         }
     }
 
@@ -177,7 +146,7 @@ fun defaultWeightFn(g: NavWorldGraph, u:Int, v:Int): Int {
 }
 
 // ---- 유틸: (u->v) edge index 찾기 (없으면 -1) ----
-private fun edgeIndex(idx: CCHIndex, u:Int, v:Int): Int {
+fun edgeIndex(idx: CCHIndex, u:Int, v:Int): Int {
     val off = idx.upOff; val to = idx.upTo
     var lo = off[u]; var hi = off[u+1]-1
     while (lo <= hi) {
@@ -189,60 +158,209 @@ private fun edgeIndex(idx: CCHIndex, u:Int, v:Int): Int {
     return -1
 }
 
-/** 퍼펙트 커스터마이즈: 낮은 삼각형 반복 없이 한 번의 하향→상향 전파로 완성 */
-fun customizeWeightsPerfect(idx: CCHIndex, g: NavWorldGraph, weightFn: (NavWorldGraph, Int, Int)->Int = ::defaultWeightFn) {
+fun contractFast(g: NavWorldGraph, order:IntArray, policy: MovePolicy): CCHIndex {
     val n = g.nodeCount
-    val off = idx.upOff;
-    val to = idx.upTo;
-    val mid = idx.upMid;
-    val w = idx.upW
-    val rank = idx.rank
+    if (n==0) return CCHIndex(IntArray(0), IntArray(1){0}, IntArray(0), IntArray(0), IntArray(0))
 
-    // 0) 초기화: 원본 간선은 weightFn, 쇼트컷은 INF
-    val INF = Int.MAX_VALUE / 4
+    val rank = IntArray(n); for (r in order.indices) rank[order[r]] = r
+    val upTmp = Array(n){ PairArrayList() }
+
+    // 1) 원본 간선 → Upward only
     for (u in 0 until n) {
-        val s = off[u];
-        val e = off[u + 1]
-        var i = s
+        var i = g.csrOff[u]; val e = g.csrOff[u+1]
         while (i < e) {
-            val v = to[i]
-            w[i] = if (mid[i] == -1) weightFn(g, u, v) else INF
+            val v = g.csrTo[i]
+            if (rank[u] < rank[v]) upTmp[u].add(v, -1)
             i++
         }
     }
 
-    // 1) 낮은 삼각형 완화: v를 낮은→높은 rank 순으로 스윕
-    val orderByRank = IntArray(n) { it }.sortedBy { rank[it] }
-    for (v in orderByRank) {
-        // v의 상위 이웃들 H(v) 수집
-        val start = off[v];
-        val end = off[v + 1]
-        if (start >= end) continue
-        // 모든 쌍 (a,b) (rank[a] < rank[b])에 대해 완화
-        var i = start
-        while (i < end) {
-            val a = to[i];
-            val w_va = w[i]
-            if (w_va == INF) {
-                i++; continue
-            } // 아직 유효치가 없으면 스킵
-            var j = i + 1
-            while (j < end) {
-                val b = to[j];
-                val w_vb = w[j]
-                if (w_vb != INF) {
-                    val u = if (rank[a] < rank[b]) a else b
-                    val t = if (rank[a] < rank[b]) b else a
-                    val eid = edgeIndex(idx, u, t)
-                    if (eid >= 0) {
-                        val cand = w_va + w_vb
-                        if (cand < w[eid]) w[eid] = cand
-                    }
+    // 2) 수축: 세트 마킹 방식
+    val inH = BooleanArray(n)
+    for (r in order.indices) {
+        val v = order[r]
+        // H(v) 수집 & 마킹
+        val H = IntArrayList()
+        run {
+            var i = g.csrOff[v]; val e = g.csrOff[v+1]
+            while (i < e) {
+                val h = g.csrTo[i]
+                if (rank[h] > r) { H.add(h); inH[h] = true }
+                i++
+            }
+        }
+        // 각 a∈H의 이웃 b 중에서 b∈H이고 a≠b인 것만 쇼트컷
+        var ix = 0
+        while (ix < H.size()) {
+            val a = H[ix]
+            var i = g.csrOff[a]; val e = g.csrOff[a+1]
+            while (i < e) {
+                val b = g.csrTo[i]
+                if (b != a && inH[b]) {
+                    if (rank[a] < rank[b]) upTmp[a].add(b, v) else upTmp[b].add(a, v)
                 }
-                j++
+                i++
+            }
+            ix++
+        }
+        // 언마킹
+        ix = 0; while (ix < H.size()) { inH[H[ix]] = false; ix++ }
+    }
+
+    // 3) 정렬+중복제거(원본 간선 우선)
+    val upOff = IntArray(n+1); var M = 0
+    val cleanedTo = Array(n){ IntArrayList() }
+    val cleanedMid = Array(n){ IntArrayList() }
+    fun prefer(cur:Int, cand:Int, rank:IntArray): Int {
+        if (cur==-1 || cand==-1) return -1
+        return if (rank[cand] < rank[cur]) cand else cur
+    }
+    for (u in 0 until n) {
+        val (to0, mid0) = upTmp[u].toArrays()
+        if (to0.isEmpty()) { upOff[u] = M; continue }
+        // 인덱스 정렬 by dest
+        val idx = (to0.indices).toMutableList()
+        idx.sortBy { to0[it] }
+        var last = -1; var chosen = Int.MAX_VALUE; var cnt = 0
+        for (p in idx) {
+            val t = to0[p]; val m = mid0[p]
+            if (t != last) {
+                if (last != -1) { cleanedTo[u].add(last); cleanedMid[u].add(if (chosen==Int.MAX_VALUE) -1 else chosen); cnt++ }
+                last = t; chosen = m
+            } else {
+                chosen = prefer(chosen, m, rank)
+            }
+        }
+        if (last != -1) { cleanedTo[u].add(last); cleanedMid[u].add(if (chosen==Int.MAX_VALUE) -1 else chosen); cnt++ }
+        upOff[u] = M; M += cnt
+    }
+    upOff[n] = M
+    val upTo = IntArray(M); val upMid = IntArray(M); var p = 0
+    for (u in 0 until n) {
+        val toL = cleanedTo[u]; val midL = cleanedMid[u]
+        var i=0; while (i<toL.size()) { upTo[p] = toL[i]; upMid[p] = midL[i]; p++; i++ }
+    }
+    val upW = IntArray(M) { 0 }
+    return CCHIndex(rank, upOff, upTo, upMid, upW)
+}
+
+private class PairBuf(cap:Int = 8){
+    var to = IntArray(cap); var mid = IntArray(cap); var n = 0
+    fun add(t:Int,m:Int){
+        if (n==to.size){ val nc = max(8,to.size*2); to=to.copyOf(nc); mid=mid.copyOf(nc) }
+        to[n]=t; mid[n]=m; n++
+    }
+}
+
+private fun sortPairsByFirst(to:IntArray, mid:IntArray, len:Int){
+    fun swap(i:Int,j:Int){ val a=to[i]; to[i]=to[j]; to[j]=a; val b=mid[i]; mid[i]=mid[j]; mid[j]=b }
+    fun q(l:Int,r:Int){
+        var i=l; var j=r; val p=to[(l+r) ushr 1]
+        while(i<=j){
+            while(to[i] < p) i++
+            while(to[j] > p) j--
+            if(i<=j){ swap(i,j); i++; j-- }
+        }
+        if(l<j) q(l,j); if(i<r) q(i,r)
+    }
+    if (len>1) q(0,len-1)
+}
+
+fun contractUltra(g: NavWorldGraph, order:IntArray, policy: MovePolicy): CCHIndex {
+    val n = g.nodeCount
+    if (n==0) return CCHIndex(IntArray(0), IntArray(1){0}, IntArray(0), IntArray(0), IntArray(0))
+
+    // node -> rank
+    val rank = IntArray(n); for (r in order.indices) rank[order[r]] = r
+
+    // ① Up 인접리스트 구성 (원본 CSR 한 번 스캔)
+    val upCnt = IntArray(n+1)
+    for (u in 0 until n){
+        var i=g.csrOff[u]; val e=g.csrOff[u+1]
+        while(i<e){ val v=g.csrTo[i]; if (rank[u] < rank[v]) upCnt[u+1]++; i++ }
+    }
+    // prefix-sum
+    for (i in 0 until n) upCnt[i+1]+=upCnt[i]
+    val upTo = IntArray(upCnt[n])
+    run {
+        val cur = upCnt.clone()
+        for (u in 0 until n){
+            var i=g.csrOff[u]; val e=g.csrOff[u+1]
+            while(i<e){ val v=g.csrTo[i]; if (rank[u] < rank[v]) upTo[cur[u]++] = v; i++ }
+        }
+    }
+
+    // ② 원본 Up 간선은 그대로 유지해야 하므로 버퍼에 먼저 적재
+    val buf = Array(n){ PairBuf() }
+    for (u in 0 until n){
+        var i=upCnt[u]; val e=upCnt[u+1]
+        while(i<e){ buf[u].add(upTo[i], -1); i++ } // -1 = 원본 간선
+    }
+
+    // ③ 수축 루프: H(v)=Up(v) 마킹, a∈H의 Up(a)∩H(v)만 걷기
+    val inH = BooleanArray(n)
+    for (r in order.indices){
+        val v = order[r]
+        // H(v) 수집/마킹
+        var s = upCnt[v]; val t = upCnt[v+1]
+        var i = s; while (i < t){ inH[upTo[i]] = true; i++ }
+        // a ∈ H(v)
+        i = s
+        while (i < t){
+            val a = upTo[i]
+            // Up(a)와 H(v) 교차
+            var p = upCnt[a]; val q = upCnt[a+1]
+            while (p < q){
+                val b = upTo[p]
+                if (inH[b]) {
+                    // a<b 방향으로만 추가
+                    if (rank[a] < rank[b]) buf[a].add(b, v) else buf[b].add(a, v)
+                }
+                p++
             }
             i++
         }
+        // 언마킹
+        i = s; while (i < t){ inH[upTo[i]] = false; i++ }
     }
-    // (선택) 상위 삼각형 한 번 더 돌리면 수렴이 더 빨라짐(대개 필요 없음)
+
+    // ④ 노드별 정렬+중복제거(원본 우선, 아니면 mid rank 낮은 쪽)
+    val off = IntArray(n+1); var M = 0
+    val outTo = IntArrayList(); val outMid = IntArrayList()
+    fun prefer(cur:Int, cand:Int): Int {
+        if (cur==-1 || cand==-1) return -1
+        return if (rank[cand] < rank[cur]) cand else cur
+    }
+    for (u in 0 until n){
+        val b = buf[u]
+        // to,mid를 dest 기준 정렬
+        sortPairsByFirst(b.to, b.mid, b.n)
+        var last = Int.MIN_VALUE
+        var chosen = Int.MAX_VALUE
+        var k = 0
+        while (k < b.n){
+            val dest = b.to[k]; val m = b.mid[k]
+            if (dest != last){
+                if (last != Int.MIN_VALUE){
+                    outTo.add(last); outMid.add(if (chosen==Int.MAX_VALUE) -1 else chosen)
+                }
+                last = dest; chosen = m
+            } else {
+                chosen = prefer(chosen, m)
+            }
+            k++
+        }
+        if (last != Int.MIN_VALUE){
+            outTo.add(last); outMid.add(if (chosen==Int.MAX_VALUE) -1 else chosen)
+        }
+        off[u] = M
+        M = outTo.size()
+    }
+    off[n] = M
+
+    val upToFinal  = outTo.toIntArray()
+    val upMidFinal = outMid.toIntArray()
+    val upW = IntArray(M) { 0 }
+
+    return CCHIndex(rank, off, upToFinal, upMidFinal, upW)
 }

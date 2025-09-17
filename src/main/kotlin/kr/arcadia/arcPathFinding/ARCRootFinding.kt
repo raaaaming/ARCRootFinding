@@ -2,34 +2,49 @@ package kr.arcadia.arcPathFinding
 
 import com.mojang.brigadier.Command
 import com.mojang.brigadier.arguments.DoubleArgumentType
+import com.mojang.brigadier.arguments.IntegerArgumentType
 import com.mojang.brigadier.builder.LiteralArgumentBuilder
 import com.mojang.brigadier.tree.LiteralCommandNode
 import io.papermc.paper.command.brigadier.CommandSourceStack
 import io.papermc.paper.command.brigadier.Commands
 import io.papermc.paper.plugin.lifecycle.event.types.LifecycleEvents
-import kr.arcadia.arcPathFinding.cch.contract
-import kr.arcadia.arcPathFinding.cch.customizeWeightsPerfect
-import kr.arcadia.arcPathFinding.cch.defaultWeightFn
+import kr.arcadia.arcPathFinding.cch.CCHIndex
+import kr.arcadia.arcPathFinding.cch.contractUltra
+import kr.arcadia.arcPathFinding.cch.customizeUpperTrianglePass
+import kr.arcadia.arcPathFinding.cch.customizeWeightsPerfectFast
 import kr.arcadia.arcPathFinding.chunk.ChunkSigCache
-import kr.arcadia.arcPathFinding.core.DynamicCCHPathfinder
+import kr.arcadia.arcPathFinding.chunk.ChunkSpatialIndex
+import kr.arcadia.arcPathFinding.chunk.NavChunk
 import kr.arcadia.arcPathFinding.core.QueryEngine
+import kr.arcadia.arcPathFinding.graph.NavWorldGraph
 import kr.arcadia.arcPathFinding.graph.mergeChunks
+import kr.arcadia.arcPathFinding.policy.MovePolicy
+import kr.arcadia.arcPathFinding.policy.WeightPolicy
+import kr.arcadia.arcPathFinding.policy.makeAttrWeightFn
+import kr.arcadia.arcPathFinding.policy.node.buildNodeAttrs
 import kr.arcadia.arcPathFinding.preprocess.PreprocessService
-import kr.arcadia.arcPathFinding.separator.buildOrderByChunkSeparator
+import kr.arcadia.arcPathFinding.query.getBlockQuery
+import kr.arcadia.arcPathFinding.separator.buildOrderByChunkSeparatorFast
+import kr.arcadia.arcPathFinding.wnm.WNMHeader
+import kr.arcadia.arcPathFinding.wnm.WNMStore
 import kr.arcadia.arcPathFinding.wnm.file.readIndex
 import kr.arcadia.arcPathFinding.wnm.file.writeIndex
 import kr.arcadia.core.bukkit.ARCBukkitPlugin
-import org.bukkit.Location
+import org.bukkit.command.CommandSender
 import org.bukkit.entity.Player
-import org.bukkit.scheduler.BukkitRunnable
+import java.util.UUID
 
 class ARCRootFinding : ARCBukkitPlugin() {
 
-    private lateinit var pathfinder: DynamicCCHPathfinder
+    private lateinit var worldGraph: NavWorldGraph
+    private lateinit var index: CCHIndex
+    private lateinit var engine: QueryEngine
+    private lateinit var snap: ChunkSpatialIndex
 
-    override fun onPostLoad() {
-        pathfinder = DynamicCCHPathfinder(this)
-    }
+    private val dataDir by lazy { dataFolder.toPath() }
+    private val wnmPath by lazy { dataDir.resolve("map.wnm") }
+    private val cchPath by lazy { dataDir.resolve("map.cch.gz") }
+    private val sigPath by lazy { dataDir.resolve("map.sig.gz") }
 
     override fun onPreEnable() {
         lifecycleManager.registerEventHandler(LifecycleEvents.COMMANDS) { command ->
@@ -37,50 +52,200 @@ class ARCRootFinding : ARCBukkitPlugin() {
         }
     }
 
-    val buildCommand: LiteralCommandNode<CommandSourceStack> = LiteralArgumentBuilder.literal<CommandSourceStack>("arcrootfinding")
-        .then(Commands.literal("test")
+    override fun onPostEnable() {
+        if (!dataFolder.exists()) dataFolder.mkdirs()
+
+        val w = server.worlds.first()               // 대상 월드 선택(예: overworld)
+        val bq = w.getBlockQuery()
+        val policy = MovePolicy(allowDiag = true, maxDrop = 3, stepUp = 1, forbidCornerClip = true)
+
+        // ---- M6 증분 전처리 (중심/반경/높이 범위는 서버 상황에 맞게) ----
+        val pre = PreprocessService(bq, policy)
+        val sigCache = ChunkSigCache().apply { load(sigPath) }
+        val center = w.spawnLocation
+        val yMin = 40; val yMax = 140
+        val changed: List<NavChunk> = pre.preprocessRadius(center.blockX, center.blockZ, radiusChunks = 1, yMin, yMax, sigCache)
+        sigCache.save(sigPath)
+
+        println("M6")
+
+        // ---- M5 WNM 저장소: 기존 + 변경분 병합 저장 ----
+        val store = WNMStore()
+        val header = WNMHeader(
+            version = 1,
+            policyHash = policy.hash(),
+            worldUUID = UUID(0L,0L),   // 필요시 실제 world UID 사용
+            yMin = yMin, yMax = yMax,
+            createdAt = System.currentTimeMillis()
+        )
+        store.appendOrPatch(wnmPath, header, changed)
+
+        println("M5") //5분 정도...
+
+        // ---- 전체 로드 → 병합 → CCH 수축 → 커스터마이즈 ----
+        val (_, chunks) = store.readAll(wnmPath)
+        worldGraph = mergeChunks(chunks, policy)
+
+        println("전체 로드") //클리어
+
+        val (order, _) = buildOrderByChunkSeparatorFast(worldGraph, sepThickness = 4) // ★ 두께 2~3 추천
+        var index = contractUltra(worldGraph, order, policy)                        // ★ 빠른 수축
+
+        println("병합 → CCH 수축") //클리어
+
+        val attrs = buildNodeAttrs(worldGraph, bq)
+        val weightFn = makeAttrWeightFn(attrs, WeightPolicy(nightMultiplier = 1.0))
+        customizeWeightsPerfectFast(index, worldGraph, weightFn)
+        customizeUpperTrianglePass(index) // (선택) 1회 추가 패스
+
+        println("커스터마이즈") //클리어
+
+        // CCH 인덱스 저장/로드(선택)
+        writeIndex(cchPath, index)
+        index = readIndex(cchPath)
+
+        println("CCH 인덱스 저장/로드") //클리어
+
+        // ---- 빠른 스냅 인덱스 ----
+        snap = ChunkSpatialIndex(worldGraph)
+
+        println("빠른 스냅 인덱스") //클리어
+
+        // ---- 질의 엔진 ----
+        engine = QueryEngine(worldGraph, index)
+
+        println("질의 엔진") //클리어
+    }
+
+    val buildCommand: LiteralCommandNode<CommandSourceStack> = LiteralArgumentBuilder.literal<CommandSourceStack>("apf")
+        .then(Commands.literal("find")
             .then(Commands.argument("destination's X", DoubleArgumentType.doubleArg())
                 .then(Commands.argument("destination's Y", DoubleArgumentType.doubleArg())
                     .then(Commands.argument("destination's Z", DoubleArgumentType.doubleArg())
                         .executes { ctx ->
-                            val x = DoubleArgumentType.getDouble(ctx, "destination's X")
-                            val y = DoubleArgumentType.getDouble(ctx, "destination's Y")
-                            val z = DoubleArgumentType.getDouble(ctx, "destination's Z")
+                            val tx = DoubleArgumentType.getDouble(ctx, "destination's X")
+                            val ty = DoubleArgumentType.getDouble(ctx, "destination's Y")
+                            val tz = DoubleArgumentType.getDouble(ctx, "destination's Z")
                             val start = ctx.source.location
-                            val world = start.world
-                            val destination = Location(world, x, y, z)
+                            val w = start.world
                             val sender = (ctx.source.sender as Player)
 
                             sender.sendMessage("경로 탐색을 시작합니다...")
 
-                            // (1) 전처리 (필요 청크 빌드)
-                            val pre = PreprocessService(bq, policy)
-                            val cache = ChunkSigCache().apply { load(sigPath) }
-                            val changedChunks = pre.preprocessRadius(centerX, centerZ, radiusChunks, yMin, yMax, cache)
-                            cache.save(sigPath)
+                            val path = engine.routeWithSnap({ x,y,z -> snap.nearestNode(x,y,z) },
+                                start.blockX, start.blockY, start.blockZ, tx.toInt(), ty.toInt(), tz.toInt())
 
-                            // (2) 병합 → 전역 그래프
-                            val world = mergeChunks(changedChunks /* + 기존 유지 중인 청크들 */)
+                            if (path.isEmpty()) {
+                                sender.sendMessage("경로를 찾을 수 없습니다.")
+                                return@executes Command.SINGLE_SUCCESS
+                            }
+                            val coords = path.map { p -> "(${p[0]}, ${p[1]}, ${p[2]})" }
 
-                            // (3) 순서 생성 → 수축
-                            val (order, level) = buildOrderByChunkSeparator(world)
-                            val idx = contract(world, order, policy)
-
-                            // (4) 커스터마이즈(가중치 반영)
-                            customizeWeightsPerfect(idx, world, ::defaultWeightFn)
-
-                            // (5) I/O (선택)
-                            writeIndex(cchPath, idx)
-                            val idx2 = readIndex(cchPath) // 검증용
-
-                            // (6) 질의
-                            val engine = QueryEngine(world, idx)
-                            val path = engine.route(sx,sy,sz, tx,ty,tz) // List<IntArray> (각 [x,y,z])
+                            // 전체 좌표를 출력 (목적지까지 전부)
+                            coords.chunked(6).forEach { chunk ->
+                                sender.sendMessage("§a" + chunk.joinToString(" §7→§a "))
+                            }
 
                             return@executes Command.SINGLE_SUCCESS
                         }
                     )
                 )
             )
-        ).build()
+        )
+        .then(Commands.literal("debug")
+            .then(Commands.argument("x", IntegerArgumentType.integer())
+                .then(Commands.argument("y", IntegerArgumentType.integer())
+                    .then(Commands.argument("z", IntegerArgumentType.integer())
+                        .executes { ctx ->
+                            debugNeighborsAt(ctx.source.sender, engine, worldGraph, IntegerArgumentType.getInteger(ctx, "x"), IntegerArgumentType.getInteger(ctx, "y"), IntegerArgumentType.getInteger(ctx, "z"))
+                            return@executes Command.SINGLE_SUCCESS
+                        }
+                    )
+                )
+            )
+        )
+        .build()
+}
+
+fun debugNeighborsAt(sender: CommandSender, engine: QueryEngine, g: NavWorldGraph, x:Int,y:Int,z:Int) {
+    val s = engine.javaClass.getDeclaredMethod("nearestNode", Int::class.java, Int::class.java, Int::class.java)
+        .apply { isAccessible = true }
+        .invoke(engine, x, y, z) as Int
+    if (s < 0) { sender.sendMessage("No snap"); return }
+    val off = engine.javaClass.getDeclaredField("idx").apply { isAccessible = true }
+        .get(engine) as CCHIndex
+    val sOff = off.upOff[s]; val e = off.upOff[s + 1]
+    var flat=0; var up=0; var down=0
+    for (i in sOff until e) {
+        val v = off.upTo[i]
+        val dy = g.nodeY(v) - g.nodeY(s)
+        when {
+            dy == 0 -> flat++
+            dy > 0  -> up++
+            else    -> down++
+        }
+    }
+    sender.sendMessage("neighbors at ($x,$y,$z) => flat=$flat, up=$up, down=$down")
+}
+
+fun debugNeighborsAround(
+    g: NavWorldGraph,
+    x:Int, y:Int, z:Int,
+    maxPrint:Int = 32
+) {
+    // 좌표→노드 스냅(간단 스캔; 느려도 디버그용 OK)
+    var s = -1; var best = Long.MAX_VALUE
+    val a = g.xyzt
+    for (u in 0 until g.nodeCount) {
+        val dx = (a[u*3]-x).toLong(); val dy = (a[u*3+1]-y).toLong(); val dz = (a[u*3+2]-z).toLong()
+        val d2 = dx*dx + dy*dy + dz*dz
+        if (d2 < best) { best = d2; s = u }
+    }
+    if (s < 0) { println("no snap"); return }
+
+    val sx = a[s*3]; val sy = a[s*3+1]; val sz = a[s*3+2]
+    println("node s=$s at ($sx,$sy,$sz)")
+
+    val off = g.csrOff; val to = g.csrTo
+    var flat=0; var up=0; var down=0; var cnt=0
+    var i = off[s]; val e = off[s+1]
+    while (i < e && cnt < maxPrint) {
+        val v = to[i]; val vx = a[v*3]; val vy = a[v*3+1]; val vz = a[v*3+2]
+        val dy = vy - sy
+        val flag = when { dy > 0 -> { up++;   "↑" }
+            dy < 0 -> { down++; "↓" }
+            else   -> { flat++; "→" } }
+        println("  $flag v=$v at ($vx,$vy,$vz)  Δy=$dy")
+        i++; cnt++
+    }
+    println("counts: flat=$flat up=$up down=$down (printed=$cnt)")
+}
+
+fun debugUpwardNeighbors(
+    g: NavWorldGraph,
+    idx: CCHIndex,
+    x:Int, y:Int, z:Int,
+    maxPrint:Int = 32
+) {
+    // s 찾기
+    var s = -1; var best = Long.MAX_VALUE
+    val a = g.xyzt
+    for (u in 0 until g.nodeCount) {
+        val dx = (a[u*3]-x).toLong(); val dy = (a[u*3+1]-y).toLong(); val dz = (a[u*3+2]-z).toLong()
+        val d2 = dx*dx + dy*dy + dz*dz
+        if (d2 < best) { best = d2; s = u }
+    }
+    if (s < 0) { println("no snap"); return }
+
+    val sx = a[s*3]; val sy = a[s*3+1]; val sz = a[s*3+2]
+    println("UP-graph at s=$s ($sx,$sy,$sz), rank[s]=${idx.rank[s]}")
+
+    val off = idx.upOff; val to = idx.upTo
+    var i = off[s]; val e = off[s+1]
+    var k = 0
+    while (i < e && k < maxPrint) {
+        val v = to[i]; val vx = a[v*3]; val vy = a[v*3+1]; val vz = a[v*3+2]
+        println("  → v=$v rank=${idx.rank[v]} at ($vx,$vy,$vz)  Δy=${vy - sy}  mid=${idx.upMid[i]}  w=${idx.upW[i]}")
+        i++; k++
+    }
 }

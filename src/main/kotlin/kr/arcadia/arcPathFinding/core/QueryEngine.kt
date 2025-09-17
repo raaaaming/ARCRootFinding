@@ -4,13 +4,13 @@ import kr.arcadia.arcPathFinding.cch.CCHIndex
 import kr.arcadia.arcPathFinding.graph.NavWorldGraph
 import java.util.PriorityQueue
 
-class QueryEngine(
-    private val g: NavWorldGraph,
-    private val idx: CCHIndex
+open class QueryEngine(
+    open val g: NavWorldGraph,
+    open val idx: CCHIndex
 ) {
-    // 전치 그래프(Reverse Upward) 준비
-    private val revOff: IntArray
-    private val revTo: IntArray
+    // --------- Reverse Upward (전치 그래프) 준비 ---------
+    val revOff: IntArray
+    val revTo: IntArray
     init {
         val n = g.nodeCount
         val off = idx.upOff; val to = idx.upTo
@@ -33,21 +33,22 @@ class QueryEngine(
         }
     }
 
-    // 최근접 노드 스냅 (단순 버전: 전체 스캔)
-    private fun nearestNode(x:Int,y:Int,z:Int): Int {
+    // --------- (옵션) 브루트 최근접 스냅 ---------
+    fun nearestNode(x:Int,y:Int,z:Int): Int {
         var best = -1; var bestD = Long.MAX_VALUE
-        val N = g.nodeCount; val a = g.xyzt
-        var i=0
-        while (i < N) {
-            val dx = (a[i*3]-x).toLong(); val dy = (a[i*3+1]-y).toLong(); val dz = (a[i*3+2]-z).toLong()
+        val a = g.xyzt
+        for (u in 0 until g.nodeCount) {
+            val dx = (a[u*3]-x).toLong()
+            val dy = (a[u*3+1]-y).toLong()
+            val dz = (a[u*3+2]-z).toLong()
             val d2 = dx*dx + dy*dy + dz*dz
-            if (d2 < bestD) { bestD = d2; best = i }
-            i++
+            if (d2 < bestD) { bestD = d2; best = u }
         }
         return best
     }
 
-    private fun edgeIndex(u:Int, v:Int): Int {
+    // --------- Upward 간선 검색 (이진 탐색) ---------
+    fun edgeIndex(u:Int, v:Int): Int {
         val off = idx.upOff; val to = idx.upTo
         var lo = off[u]; var hi = off[u+1]-1
         while (lo <= hi) {
@@ -59,65 +60,64 @@ class QueryEngine(
         return -1
     }
 
-    // Upward 경로 언패킹: [u, ..., v]로 확장
-    private fun unpackAscending(u:Int, v:Int, out: MutableList<Int>) {
-        // 전제: rank[u] < rank[v]
-        val eid = edgeIndex(u, v)
-        require(eid >= 0) { "No upward edge for unpack" }
+    // --------- 언패킹 (포함 범위 [lo..hi] 반환) ---------
+    /** CCH 표준: rank[lo] < rank[hi] 전제. 결과는 노드열 [lo, ..., hi] */
+    private fun unpackInclusive(lo:Int, hi:Int): IntArray {
+        val eid = edgeIndex(lo, hi)
+        require(eid >= 0) { "Upward edge ($lo->$hi) not found for unpack" }
         val mid = idx.upMid[eid]
         if (mid < 0) {
-            out.add(v)
-            return
+            return intArrayOf(lo, hi)
         }
-        // u->mid 와 mid->v 로 분해 (방향 주의: mid<rank(u))
-        // (mid,u)는 상승이 아니므로 (mid,u)로 호출하고 결과를 뒤집어 붙임
-        val left = ArrayList<Int>()
-        unpackAscending(minOf(mid,u), maxOf(mid,u), left) // [min..max]
-        // left는 [mid..u] 또는 [u..mid]
-        if (left.first() == u) left.reverse() // [u..mid] 로 맞춤
-        val right = ArrayList<Int>()
-        unpackAscending(minOf(mid,v), maxOf(mid,v), right) // [mid..v]
-        // 병합: u..mid + (mid..v) (mid 중복 제거)
-        out.addAll(left.drop(1)) // u는 이미 바깥에서 포함될 것이므로 mid부터
-        out.addAll(right)        // right는 mid부터 시작, drop(1) 안 해도 위 줄에서 제거됨
+        // mid의 rank는 lo보다 더 낮다(= mid < lo < hi). 그러므로 (mid, lo)와 (mid, hi) 둘 다 upward.
+        val left  = unpackInclusive(minOf(mid, lo), maxOf(mid, lo))   // [mid..lo]
+        val right = unpackInclusive(minOf(mid, hi), maxOf(mid, hi))   // [mid..hi]
+        // 병합: [mid..lo] + [mid..hi]에서 mid 중복 제거하고 [lo..mid..hi]가 되도록 순서 맞추기
+        // left: [mid, ..., lo]  -> lo가 마지막
+        // right:[mid, ..., hi]  -> mid로 시작
+        val out = IntArray(left.size + right.size - 1)
+        // left를 그대로 복사
+        System.arraycopy(left, 0, out, 0, left.size)
+        // right는 mid 중복을 제거하고 이어붙임
+        System.arraycopy(right, 1, out, left.size, right.size - 1)
+        return out
     }
 
-    /** 경로 질의: (sx,sy,sz) -> (tx,ty,tz), 결과는 노드 좌표 리스트 */
-    fun route(sx:Int, sy:Int, sz:Int, tx:Int, ty:Int, tz:Int): List<IntArray> {
-        val s = nearestNode(sx,sy,sz)
-        val t = nearestNode(tx,ty,tz)
-        if (s < 0 || t < 0) return emptyList()
+    // --------- 공통: s,t (노드ID)로 경로 구해서 좌표 반환 ---------
+    private fun routeByNodeIds(s:Int, t:Int): List<IntArray> {
+        if (s == t) return listOf(intArrayOf(g.xyzt[s*3], g.xyzt[s*3+1], g.xyzt[s*3+2]))
 
         val n = g.nodeCount
         val INF = Int.MAX_VALUE/4
+        data class QN(val d:Int, val u:Int)
+
         val distF = IntArray(n) { INF }
         val distB = IntArray(n) { INF }
         val prevF = IntArray(n) { -1 }
         val prevB = IntArray(n) { -1 }
 
-        data class QN(val d:Int, val u:Int)
         val pqF = PriorityQueue<QN>(compareBy { it.d })
         val pqB = PriorityQueue<QN>(compareBy { it.d })
 
-        distF[s] = 0; pqF.add(QN(0,s))
-        distB[t] = 0; pqB.add(QN(0,t))
+        distF[s] = 0; pqF.add(QN(0, s))
+        distB[t] = 0; pqB.add(QN(0, t))
 
         var best = INF
         var meet = -1
 
-        // 양방향 다익스트라 (Upward / Reverse-Upward)
+        // 양방향 다익스트라 (Forward=Upward / Backward=Reverse-Upward)
         while (pqF.isNotEmpty() || pqB.isNotEmpty()) {
             if (pqF.isNotEmpty()) {
-                val cur = pqF.poll(); if (cur.d != distF[cur.u]) { /*skip*/ } else {
+                val cur = pqF.poll()
+                if (cur.d == distF[cur.u]) {
                     val u = cur.u
                     if (distF[u] + distB[u] < best) { best = distF[u] + distB[u]; meet = u }
-                    val sOff = idx.upOff[u]; val sEnd = idx.upOff[u+1]
-                    var i = sOff
-                    while (i < sEnd) {
+                    var i = idx.upOff[u]; val e = idx.upOff[u+1]
+                    while (i < e) {
                         val v = idx.upTo[i]
-                        val wuv = idx.upW[i]
-                        if (wuv < INF && distF[v] > distF[u] + wuv) {
-                            distF[v] = distF[u] + wuv
+                        val w = idx.upW[i]
+                        if (w < INF && distF[v] > distF[u] + w) {
+                            distF[v] = distF[u] + w
                             prevF[v] = u
                             pqF.add(QN(distF[v], v))
                         }
@@ -126,18 +126,17 @@ class QueryEngine(
                 }
             }
             if (pqB.isNotEmpty()) {
-                val cur = pqB.poll(); if (cur.d != distB[cur.u]) { /*skip*/ } else {
+                val cur = pqB.poll()
+                if (cur.d == distB[cur.u]) {
                     val u = cur.u
                     if (distF[u] + distB[u] < best) { best = distF[u] + distB[u]; meet = u }
-                    val sOff = revOff[u]; val sEnd = revOff[u+1]
-                    var i = sOff
-                    while (i < sEnd) {
-                        val v = revTo[i] // 역방향에서 v->u 이면 원본은 u<-v (즉 forward에서 v는 u보다 낮은 rank)
-                        // 역방향도 upW를 그대로 씀(무향 메트릭 가정)
+                    var i = revOff[u]; val e = revOff[u+1]
+                    while (i < e) {
+                        val v = revTo[i] // reverse upward에서 v -> u 이면, 원래 upward는 v -> u
                         val eid = edgeIndex(v, u)
-                        val wvu = if (eid>=0) idx.upW[eid] else INF
-                        if (wvu < INF && distB[v] > distB[u] + wvu) {
-                            distB[v] = distB[u] + wvu
+                        val w = if (eid >= 0) idx.upW[eid] else INF
+                        if (w < INF && distB[v] > distB[u] + w) {
+                            distB[v] = distB[u] + w
                             prevB[v] = u
                             pqB.add(QN(distB[v], v))
                         }
@@ -145,35 +144,44 @@ class QueryEngine(
                     }
                 }
             }
-            // 간단한 정지조건: 현재 best보다 작은 후보가 더 이상 나오기 힘들면 break (생략 가능)
+            // (선택) 더 똑똑한 정지조건 가능: 두 큐의 top 합이 best 이상이면 break
         }
+
         if (meet == -1) return emptyList()
 
-        // Upward 경로 복원: s -> meet
+        // Upward 경로 노드열(피크를 중심으로 앞뒤 결합)
         val upPath = ArrayList<Int>()
         run {
+            // s -> meet (forward)
             val stack = ArrayList<Int>()
             var u = meet
             while (u != -1) { stack.add(u); u = prevF[u] }
-            // stack: [meet, ..., s]
-            for (i in stack.size-1 downTo 0) upPath.add(stack[i])
+            for (i in stack.size-1 downTo 0) upPath.add(stack[i]) // [s..meet]
         }
-        // meet -> t (역방향 prevB 이용)
         run {
+            // meet -> t (backward)
             var u = prevB[meet]
-            while (u != -1) { upPath.add(u); u = prevB[u] }
+            while (u != -1) { upPath.add(u); u = prevB[u] } // [meet..t]
         }
 
-        // 언패킹: Upward 경로의 각 간선을 풀어서 원래 노드열로
+        // 언패킹: 각 (a,b) 구간을 rank 방향에 맞게 펼친다
         val seq = ArrayList<Int>()
         if (upPath.isNotEmpty()) {
             seq.add(upPath[0])
             for (i in 0 until upPath.size-1) {
-                val a = upPath[i]; val b = upPath[i+1]
-                // a,b의 랭크 방향 맞추기
-                val lo = if (idx.rank[a] < idx.rank[b]) a else b
-                val hi = if (idx.rank[a] < idx.rank[b]) b else a
-                unpackAscending(lo, hi, seq) // seq 마지막에 hi까지 추가
+                val a = upPath[i]
+                val b = upPath[i+1]
+                val ra = idx.rank[a]; val rb = idx.rank[b]
+                val lo = if (ra < rb) a else b
+                val hi = if (ra < rb) b else a
+                val expanded = unpackInclusive(lo, hi) // [lo..hi]
+                if (ra < rb) {
+                    // a -> b가 상승 구간: [lo..hi]에서 앞의 한 칸(lo)만 중복 제거하고 붙임
+                    for (k in 1 until expanded.size) seq.add(expanded[k])
+                } else {
+                    // a -> b가 하강 구간: [lo..hi]를 뒤집어서 [hi..lo]로, hi==a이므로 앞 한 칸 제거
+                    for (k in expanded.size-2 downTo 0) seq.add(expanded[k])
+                }
             }
         }
 
@@ -183,5 +191,29 @@ class QueryEngine(
             out.add(intArrayOf(g.xyzt[u*3], g.xyzt[u*3+1], g.xyzt[u*3+2]))
         }
         return out
+    }
+
+    // --------- 기존 API: 좌표로 스냅(브루트) + 탐색 ---------
+    fun route(sx:Int, sy:Int, sz:Int, tx:Int, ty:Int, tz:Int): List<IntArray> {
+        val s = nearestNode(sx,sy,sz)
+        val t = nearestNode(tx,ty,tz)
+        if (s < 0 || t < 0) return emptyList()
+        return routeByNodeIds(s, t)
+    }
+
+    // --------- 요청한 API: 외부 스냅 함수 사용 ---------
+    /**
+     * @param snapFn (x,y,z) -> global node id (없으면 음수)
+     * @return 경로의 (x,y,z) 좌표 리스트. 없으면 빈 리스트.
+     */
+    fun routeWithSnap(
+        snapFn:(Int,Int,Int)->Int,
+        sx:Int, sy:Int, sz:Int,
+        tx:Int, ty:Int, tz:Int
+    ): List<IntArray> {
+        val s = snapFn(sx,sy,sz)
+        val t = snapFn(tx,ty,tz)
+        if (s < 0 || t < 0) return emptyList()
+        return routeByNodeIds(s, t)
     }
 }

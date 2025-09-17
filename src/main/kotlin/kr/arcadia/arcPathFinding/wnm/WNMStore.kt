@@ -12,7 +12,7 @@ import java.util.zip.GZIPOutputStream
 
 private const val WNM_MAGIC = 0x574E4D31
 
-class WnmStore {
+class WNMStore {
 
     /** 새 파일에 헤더+청크들(순차 섹션) 저장 */
     fun writeNew(path: Path, header: WNMHeader, chunks: List<NavChunk>) {
