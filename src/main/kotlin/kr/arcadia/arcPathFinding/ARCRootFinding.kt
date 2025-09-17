@@ -164,6 +164,19 @@ class ARCRootFinding : ARCBukkitPlugin() {
                 )
             )
         )
+        .then(Commands.literal("dumpNodes")
+            .executes { ctx ->
+                val sender = ctx.source.sender
+                if (!::snap.isInitialized) {
+                    sender.sendMessage("스냅 인덱스가 아직 초기화되지 않았습니다.")
+                    return@executes Command.SINGLE_SUCCESS
+                }
+
+                val lines = snap.dumpAllNodes { _ -> }
+                lines.forEach { line -> sender.sendMessage(line) }
+                return@executes Command.SINGLE_SUCCESS
+            }
+        )
         .build()
 }
 

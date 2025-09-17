@@ -31,4 +31,33 @@ class ChunkSpatialIndexTest {
 
         assertEquals(-1, result, "Empty graphs should not produce a node id")
     }
+
+    @Test
+    fun `dumpAllNodes reports every stored node`() {
+        val coords = intArrayOf(
+            0, 64, 0,
+            16, 65, 0,
+            32, 70, 16
+        )
+        val chunkOf = intArrayOf(0, 1, 2)
+        val csrOff = intArrayOf(0, 0, 0, 0)
+        val csrTo = IntArray(0)
+        val graph = NavWorldGraph(3, coords, chunkOf, csrOff, csrTo)
+        val index = ChunkSpatialIndex(graph)
+
+        val lines = index.dumpAllNodes { }
+
+        assertEquals(
+            listOf(
+                "chunk[0,0] (1 nodes)",
+                "  id=0 -> (0,64,0)",
+                "chunk[1,0] (1 nodes)",
+                "  id=1 -> (16,65,0)",
+                "chunk[2,1] (1 nodes)",
+                "  id=2 -> (32,70,16)",
+                "total nodes: 3 across 3 chunks"
+            ),
+            lines
+        )
+    }
 }

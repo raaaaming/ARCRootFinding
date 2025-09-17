@@ -69,4 +69,33 @@ class ChunkSpatialIndex(
         }
         return best
     }
+
+    /** 디버그 용도: 현재 인덱스에 저장된 모든 노드를 출력한다. */
+    fun dumpAllNodes(emit: (String) -> Unit = ::println): List<String> {
+        val lines = ArrayList<String>()
+        var total = 0
+
+        if (map.isEmpty()) {
+            lines += "ChunkSpatialIndex: no nodes stored"
+        } else {
+            val chunks = map.entries
+                .sortedWith(compareBy({ it.key.cx }, { it.key.cz }))
+
+            for ((key, nodes) in chunks) {
+                lines += "chunk[${key.cx},${key.cz}] (${nodes.size} nodes)"
+                val sorted = nodes.sortedArray()
+                for (nodeId in sorted) {
+                    val x = g.nodeX(nodeId)
+                    val y = g.nodeY(nodeId)
+                    val z = g.nodeZ(nodeId)
+                    lines += "  id=$nodeId -> ($x,$y,$z)"
+                }
+                total += nodes.size
+            }
+        }
+
+        lines += "total nodes: $total across ${map.size} chunks"
+        lines.forEach(emit)
+        return lines
+    }
 }
