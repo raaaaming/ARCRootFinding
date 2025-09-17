@@ -8,14 +8,41 @@ private fun keyXZ(x:Int, z:Int): Long = (x.toLong() shl 32) xor (z.toLong() and 
 
 fun mergeChunks(chunks: List<NavChunk>, policy: MovePolicy): NavWorldGraph {
 
-    fun pickBestY(uy:Int, ys:IntArray, stepUp:Int, maxDrop:Int): Int? {
-        if (ys.isEmpty()) return null
-        val seen = java.util.HashSet<Int>(ys.size)
-        for (v in ys) seen.add(v)
-        if (seen.contains(uy)) return uy
-        for (d in 1..stepUp) if (seen.contains(uy + d)) return uy + d
-        for (d in 1..maxDrop) if (seen.contains(uy - d)) return uy - d
-        return null
+    fun selectCompatibleGate(
+        uy: Int,
+        cand: IntArrayList,
+        coords: IntArray,
+        stepUp: Int,
+        maxDrop: Int
+    ): Int {
+        var bestUpNode = -1
+        var bestUpDelta = Int.MAX_VALUE
+        var bestDownNode = -1
+        var bestDownDelta = Int.MAX_VALUE
+
+        var i = 0
+        while (i < cand.size()) {
+            val vLocal = cand[i]
+            val vy = coords[vLocal * 3 + 1]
+            if (vy == uy) return vLocal
+
+            if (vy > uy) {
+                val diff = vy - uy
+                if (diff <= stepUp && diff < bestUpDelta) {
+                    bestUpDelta = diff
+                    bestUpNode = vLocal
+                }
+            } else {
+                val diff = uy - vy
+                if (diff <= maxDrop && diff < bestDownDelta) {
+                    bestDownDelta = diff
+                    bestDownNode = vLocal
+                }
+            }
+            i++
+        }
+
+        return if (bestUpNode != -1) bestUpNode else bestDownNode
     }
 
     if (chunks.isEmpty()) return NavWorldGraph(0, IntArray(0), IntArray(0), IntArray(1){0}, IntArray(0))
@@ -62,16 +89,16 @@ fun mergeChunks(chunks: List<NavChunk>, policy: MovePolicy): NavWorldGraph {
     }
 
     // 3-2) 경계(게이트) 교차 간선 — ★ y상승/하강/대각까지 열어줌
-    data class GateIndex(val byXZ: MutableMap<Long, MutableList<Int>>)
+    data class GateIndex(val byXZ: MutableMap<Long, IntArrayList>)
     fun buildGateIndex(ch: NavChunk, which: Char): GateIndex {
-        val map = HashMap<Long, MutableList<Int>>()
+        val map = HashMap<Long, IntArrayList>()
         val nodes = when(which) {
             'N' -> ch.gateN; 'S' -> ch.gateS; 'W' -> ch.gateW; else -> ch.gateE
         }
         for (uLocal in nodes) {
             val x = ch.coords[uLocal*3]
             val z = ch.coords[uLocal*3+2]
-            map.computeIfAbsent(keyXZ(x, z)) { mutableListOf() }.add(uLocal)
+            map.computeIfAbsent(keyXZ(x, z)) { IntArrayList() }.add(uLocal)
         }
         return GateIndex(map)
     }
@@ -98,9 +125,8 @@ fun mergeChunks(chunks: List<NavChunk>, policy: MovePolicy): NavWorldGraph {
                 for (dx in dxCand) {
                     val key = keyXZ(ux + dx, tz)
                     val cand = gB.byXZ[key] ?: continue
-                    val yList = IntArray(cand.size) { k -> B.coords[cand[k]*3 + 1] }
-                    val ty = pickBestY(uy, yList, policy.stepUp, policy.maxDrop) ?: continue
-                    val vLocal = cand.first { B.coords[it*3 + 1] == ty }
+                    val vLocal = selectCompatibleGate(uy, cand, B.coords, policy.stepUp, policy.maxDrop)
+                    if (vLocal < 0) continue
                     val u = baseA + uLocal; val v = baseB + vLocal
                     nbr[u].add(v); nbr[v].add(u)
                 }
@@ -118,9 +144,8 @@ fun mergeChunks(chunks: List<NavChunk>, policy: MovePolicy): NavWorldGraph {
                 for (dx in dxCand) {
                     val key = keyXZ(ux + dx, tz)
                     val cand = gB.byXZ[key] ?: continue
-                    val yList = IntArray(cand.size) { k -> B.coords[cand[k]*3 + 1] }
-                    val ty = pickBestY(uy, yList, policy.stepUp, policy.maxDrop) ?: continue
-                    val vLocal = cand.first { B.coords[it*3 + 1] == ty }
+                    val vLocal = selectCompatibleGate(uy, cand, B.coords, policy.stepUp, policy.maxDrop)
+                    if (vLocal < 0) continue
                     val u = baseA + uLocal; val v = baseB + vLocal
                     nbr[u].add(v); nbr[v].add(u)
                 }
@@ -138,9 +163,8 @@ fun mergeChunks(chunks: List<NavChunk>, policy: MovePolicy): NavWorldGraph {
                 for (dz in dzCand) {
                     val key = keyXZ(tx, uz + dz)
                     val cand = gB.byXZ[key] ?: continue
-                    val yList = IntArray(cand.size) { k -> B.coords[cand[k]*3 + 1] }
-                    val ty = pickBestY(uy, yList, policy.stepUp, policy.maxDrop) ?: continue
-                    val vLocal = cand.first { B.coords[it*3 + 1] == ty }
+                    val vLocal = selectCompatibleGate(uy, cand, B.coords, policy.stepUp, policy.maxDrop)
+                    if (vLocal < 0) continue
                     val u = baseA + uLocal; val v = baseB + vLocal
                     nbr[u].add(v); nbr[v].add(u)
                 }
@@ -158,9 +182,8 @@ fun mergeChunks(chunks: List<NavChunk>, policy: MovePolicy): NavWorldGraph {
                 for (dz in dzCand) {
                     val key = keyXZ(tx, uz + dz)
                     val cand = gB.byXZ[key] ?: continue
-                    val yList = IntArray(cand.size) { k -> B.coords[cand[k]*3 + 1] }
-                    val ty = pickBestY(uy, yList, policy.stepUp, policy.maxDrop) ?: continue
-                    val vLocal = cand.first { B.coords[it*3 + 1] == ty }
+                    val vLocal = selectCompatibleGate(uy, cand, B.coords, policy.stepUp, policy.maxDrop)
+                    if (vLocal < 0) continue
                     val u = baseA + uLocal; val v = baseB + vLocal
                     nbr[u].add(v); nbr[v].add(u)
                 }
