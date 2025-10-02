@@ -145,7 +145,7 @@ class ARCPathFinding : ARCBukkitPlugin() {
 
     }
 
-    override fun onDisable() {
+    override fun onPreDisable() {
         activePathTasks.values.forEach { it.cancel() }
         activePathTasks.clear()
         instance = null
@@ -228,7 +228,7 @@ class ARCPathFinding : ARCBukkitPlugin() {
                                     if (location.world == playerLocation.world &&
                                         location.distanceSquared(playerLocation) <= 9.0
                                     ) {
-                                        sender.spawnParticle(Particle.VILLAGER_HAPPY, location, 1, 0.0, 0.0, 0.0, 0.0)
+                                        sender.spawnParticle(Particle.HAPPY_VILLAGER, location, 1, 0.0, 0.0, 0.0, 0.0)
                                     }
                                 }
                             }, 0L, 5L)
