@@ -30,8 +30,11 @@ import kr.arcadia.arcPathFinding.wnm.WNMStore
 import kr.arcadia.arcPathFinding.wnm.file.readIndex
 import kr.arcadia.arcPathFinding.wnm.file.writeIndex
 import kr.arcadia.core.bukkit.ARCBukkitPlugin
+import org.bukkit.Location
+import org.bukkit.Particle
 import org.bukkit.command.CommandSender
 import org.bukkit.entity.Player
+import org.bukkit.scheduler.BukkitTask
 import java.util.UUID
 
 class ARCRootFinding : ARCBukkitPlugin() {
@@ -40,6 +43,7 @@ class ARCRootFinding : ARCBukkitPlugin() {
     private lateinit var cchIndex: CCHIndex
     private lateinit var engine: QueryEngine
     private lateinit var snap: ChunkSpatialIndex
+    private val activePathTasks = mutableMapOf<UUID, BukkitTask>()
 
     private val dataDir by lazy { dataFolder.toPath() }
     private val wnmPath by lazy { dataDir.resolve("map.wnm") }
@@ -111,6 +115,69 @@ class ARCRootFinding : ARCBukkitPlugin() {
     }
 
     val buildCommand: LiteralCommandNode<CommandSourceStack> = LiteralArgumentBuilder.literal<CommandSourceStack>("apf")
+        .then(Commands.literal("path")
+            .then(Commands.argument("destination's X", DoubleArgumentType.doubleArg())
+                .then(Commands.argument("destination's Y", DoubleArgumentType.doubleArg())
+                    .then(Commands.argument("destination's Z", DoubleArgumentType.doubleArg())
+                        .executes { ctx ->
+                            val sender = ctx.source.sender
+                            if (sender !is Player) {
+                                sender.sendMessage("이 명령어는 플레이어만 사용할 수 있습니다.")
+                                return@executes Command.SINGLE_SUCCESS
+                            }
+
+                            val tx = DoubleArgumentType.getDouble(ctx, "destination's X").toInt()
+                            val ty = DoubleArgumentType.getDouble(ctx, "destination's Y").toInt()
+                            val tz = DoubleArgumentType.getDouble(ctx, "destination's Z").toInt()
+
+                            val start = ctx.source.location
+
+                            sender.sendMessage("경로 파티클을 생성합니다...")
+
+                            val path = engine.routeWithSnap({ x, y, z -> snap.nearestNode(x, y, z) },
+                                start.blockX, start.blockY, start.blockZ, tx, ty, tz)
+
+                            if (path.isEmpty()) {
+                                sender.sendMessage("경로를 찾을 수 없습니다.")
+                                return@executes Command.SINGLE_SUCCESS
+                            }
+
+                            activePathTasks.remove(sender.uniqueId)?.cancel()
+
+                            val particleLocations = path.map { node ->
+                                Location(start.world, node[0] + 0.5, node[1] + 0.1, node[2] + 0.5)
+                            }
+
+                            val task = server.scheduler.runTaskTimer(this, Runnable {
+                                if (!sender.isOnline) {
+                                    activePathTasks.remove(sender.uniqueId)?.cancel()
+                                    return@Runnable
+                                }
+
+                                val playerLocation = sender.location
+
+                                particleLocations.forEach { location ->
+                                    if (location.world == playerLocation.world &&
+                                        location.distanceSquared(playerLocation) <= 9.0
+                                    ) {
+                                        sender.spawnParticle(Particle.VILLAGER_HAPPY, location, 1, 0.0, 0.0, 0.0, 0.0)
+                                    }
+                                }
+                            }, 0L, 5L)
+
+                            server.scheduler.runTaskLater(this, Runnable {
+                                task.cancel()
+                                activePathTasks.remove(sender.uniqueId)
+                            }, 20L * 30)
+
+                            activePathTasks[sender.uniqueId] = task
+
+                            return@executes Command.SINGLE_SUCCESS
+                        }
+                    )
+                )
+            )
+        )
         .then(Commands.literal("find")
             .then(Commands.argument("destination's X", DoubleArgumentType.doubleArg())
                 .then(Commands.argument("destination's Y", DoubleArgumentType.doubleArg())
