@@ -5,7 +5,7 @@ plugins {
 }
 
 group = "kr.arcadia"
-version = "1.0.0-SNAPSHOT"
+version = "1.0.0"
 
 repositories {
     mavenCentral()
@@ -19,7 +19,6 @@ dependencies {
     compileOnly(files("libs/ARCCore-1.0.0.jar"))
     implementation("org.jetbrains.kotlin:kotlin-stdlib-jdk8")
     testImplementation(kotlin("test"))
-    testCompileOnly(files("libs/ARCCore-1.0.0.jar"))
 }
 
 tasks {

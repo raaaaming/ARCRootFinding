@@ -30,23 +30,57 @@ import kr.arcadia.arcPathFinding.wnm.WNMStore
 import kr.arcadia.arcPathFinding.wnm.file.readIndex
 import kr.arcadia.arcPathFinding.wnm.file.writeIndex
 import kr.arcadia.core.bukkit.ARCBukkitPlugin
+import org.bukkit.Location
+import org.bukkit.Particle
 import org.bukkit.command.CommandSender
 import org.bukkit.entity.Player
+import org.bukkit.scheduler.BukkitTask
+import org.bukkit.World
 import java.util.UUID
 
-class ARCRootFinding : ARCBukkitPlugin() {
+interface ARCPathFindingAPI {
+    fun getPath(origin: Location, destination: Location): List<Location>
+    fun getPath(destination: Location): List<Location>
+}
+
+class ARCPathFinding : ARCBukkitPlugin() {
+
+    companion object {
+        @Volatile
+        private var instance: ARCPathFinding? = null
+
+        @JvmStatic
+        fun getAPI(): ARCPathFindingAPI {
+            val plugin = instance ?: throw IllegalStateException("ARCPathFinding is not enabled yet")
+            return plugin.api
+        }
+    }
 
     private lateinit var worldGraph: NavWorldGraph
     private lateinit var cchIndex: CCHIndex
     private lateinit var engine: QueryEngine
     private lateinit var snap: ChunkSpatialIndex
+    private lateinit var pathWorld: World
+    private val activePathTasks = mutableMapOf<UUID, BukkitTask>()
 
     private val dataDir by lazy { dataFolder.toPath() }
     private val wnmPath by lazy { dataDir.resolve("map.wnm") }
     private val cchPath by lazy { dataDir.resolve("map.cch.gz") }
     private val sigPath by lazy { dataDir.resolve("map.sig.gz") }
 
+    private val api: ARCPathFindingAPI = object : ARCPathFindingAPI {
+        override fun getPath(origin: Location, destination: Location): List<Location> {
+            return computePath(origin, destination)
+        }
+
+        override fun getPath(destination: Location): List<Location> {
+            val world = destination.world ?: throw IllegalArgumentException("Destination must have an associated world")
+            return computePath(world.spawnLocation, destination)
+        }
+    }
+
     override fun onPreEnable() {
+        instance = this
         lifecycleManager.registerEventHandler(LifecycleEvents.COMMANDS) { command ->
             command.registrar().register(buildCommand)
         }
@@ -56,6 +90,7 @@ class ARCRootFinding : ARCBukkitPlugin() {
         if (!dataFolder.exists()) dataFolder.mkdirs()
 
         val w = server.worlds.first()               // 대상 월드 선택(예: overworld)
+        pathWorld = w
         val bq = w.getBlockQuery()
         val policy = MovePolicy(allowDiag = true, maxDrop = 3, stepUp = 1, forbidCornerClip = true)
 
@@ -85,23 +120,132 @@ class ARCRootFinding : ARCBukkitPlugin() {
         val (order, _) = buildOrderByChunkSeparatorFast(worldGraph, sepThickness = 4) // ★ 두께 2~3 추천
         val contractedIndex = contractUltra(worldGraph, order, policy)                        // ★ 빠른 수축
 
+        println("병합 → CCH 수축") //클리어
+
         val attrs = buildNodeAttrs(worldGraph, bq)
         val weightFn = makeAttrWeightFn(attrs, WeightPolicy(nightMultiplier = 1.0))
         customizeWeightsPerfectFast(contractedIndex, worldGraph, weightFn)
         customizeUpperTrianglePass(contractedIndex) // (선택) 1회 추가 패스
 
+
         // CCH 인덱스 저장/로드(선택)
         writeIndex(cchPath, contractedIndex)
         cchIndex = readIndex(cchPath)
+
+        println("CCH 인덱스 저장/로드") //클리어
+
 
         // ---- 빠른 스냅 인덱스 ----
         snap = ChunkSpatialIndex(worldGraph)
 
         // ---- 질의 엔진 ----
         engine = QueryEngine(worldGraph, cchIndex)
+
+        println("질의 엔진") //클리어
+
+    }
+
+    override fun onDisable() {
+        activePathTasks.values.forEach { it.cancel() }
+        activePathTasks.clear()
+        instance = null
+    }
+
+    private fun ensureReady() {
+        check(::engine.isInitialized && ::snap.isInitialized) { "ARCPathFinding has not finished loading yet" }
+    }
+
+    private fun computePath(origin: Location, destination: Location): List<Location> {
+        ensureReady()
+        val originWorld = origin.world ?: throw IllegalArgumentException("Origin must have an associated world")
+        val destinationWorld = destination.world ?: throw IllegalArgumentException("Destination must have an associated world")
+        require(originWorld == destinationWorld) { "Origin and destination must be in the same world" }
+        require(::pathWorld.isInitialized && originWorld == pathWorld) { "Requested world is not prepared for path finding" }
+
+        val path = engine.routeWithSnap({ x, y, z -> snap.nearestNode(x, y, z) },
+            origin.blockX, origin.blockY, origin.blockZ,
+            destination.blockX, destination.blockY, destination.blockZ
+        )
+
+        return path.map { node ->
+            Location(originWorld, node[0] + 0.5, node[1] + 0.1, node[2] + 0.5)
+        }
     }
 
     val buildCommand: LiteralCommandNode<CommandSourceStack> = LiteralArgumentBuilder.literal<CommandSourceStack>("apf")
+        .then(Commands.literal("path")
+            .then(Commands.argument("destination's X", DoubleArgumentType.doubleArg())
+                .then(Commands.argument("destination's Y", DoubleArgumentType.doubleArg())
+                    .then(Commands.argument("destination's Z", DoubleArgumentType.doubleArg())
+                        .executes { ctx ->
+                            val sender = ctx.source.sender
+                            if (sender !is Player) {
+                                sender.sendMessage("이 명령어는 플레이어만 사용할 수 있습니다.")
+                                return@executes Command.SINGLE_SUCCESS
+                            }
+
+                            val tx = DoubleArgumentType.getDouble(ctx, "destination's X").toInt()
+                            val ty = DoubleArgumentType.getDouble(ctx, "destination's Y").toInt()
+                            val tz = DoubleArgumentType.getDouble(ctx, "destination's Z").toInt()
+
+                            val origin = sender.location.clone()
+                            val originWorld = origin.world ?: run {
+                                sender.sendMessage("경로를 찾을 수 없습니다 (월드 정보 없음).")
+                                return@executes Command.SINGLE_SUCCESS
+                            }
+
+                            sender.sendMessage("경로 파티클을 생성합니다...")
+
+                            val destination = Location(originWorld, tx.toDouble(), ty.toDouble(), tz.toDouble())
+                            val path = try {
+                                api.getPath(origin, destination)
+                            } catch (ex: IllegalStateException) {
+                                sender.sendMessage("경로를 계산할 수 없습니다: ${ex.message}")
+                                return@executes Command.SINGLE_SUCCESS
+                            } catch (ex: IllegalArgumentException) {
+                                sender.sendMessage("경로를 계산할 수 없습니다: ${ex.message}")
+                                return@executes Command.SINGLE_SUCCESS
+                            }
+
+                            if (path.isEmpty()) {
+                                sender.sendMessage("경로를 찾을 수 없습니다.")
+                                return@executes Command.SINGLE_SUCCESS
+                            }
+
+                            activePathTasks.remove(sender.uniqueId)?.cancel()
+
+                            val particleLocations = path
+
+                            val task = server.scheduler.runTaskTimer(this, Runnable {
+                                if (!sender.isOnline) {
+                                    activePathTasks.remove(sender.uniqueId)?.cancel()
+                                    return@Runnable
+                                }
+
+                                val playerLocation = sender.location
+
+                                particleLocations.forEach { location ->
+                                    if (location.world == playerLocation.world &&
+                                        location.distanceSquared(playerLocation) <= 9.0
+                                    ) {
+                                        sender.spawnParticle(Particle.VILLAGER_HAPPY, location, 1, 0.0, 0.0, 0.0, 0.0)
+                                    }
+                                }
+                            }, 0L, 5L)
+
+                            server.scheduler.runTaskLater(this, Runnable {
+                                task.cancel()
+                                activePathTasks.remove(sender.uniqueId)
+                            }, 20L * 30)
+
+                            activePathTasks[sender.uniqueId] = task
+
+                            return@executes Command.SINGLE_SUCCESS
+                        }
+                    )
+                )
+            )
+        )
         .then(Commands.literal("find")
             .then(Commands.argument("destination's X", DoubleArgumentType.doubleArg())
                 .then(Commands.argument("destination's Y", DoubleArgumentType.doubleArg())
@@ -110,20 +254,33 @@ class ARCRootFinding : ARCBukkitPlugin() {
                             val tx = DoubleArgumentType.getDouble(ctx, "destination's X")
                             val ty = DoubleArgumentType.getDouble(ctx, "destination's Y")
                             val tz = DoubleArgumentType.getDouble(ctx, "destination's Z")
-                            val start = ctx.source.location
-                            val w = start.world
-                            val sender = (ctx.source.sender as Player)
+                            val sender = ctx.source.sender as Player
+                            val w = sender.world
 
                             sender.sendMessage("경로 탐색을 시작합니다...")
 
-                            val path = engine.routeWithSnap({ x,y,z -> snap.nearestNode(x,y,z) },
-                                start.blockX, start.blockY, start.blockZ, tx.toInt(), ty.toInt(), tz.toInt())
+                            val origin = sender.location.clone()
+                            if (origin.world != w) {
+                                sender.sendMessage("경로를 찾을 수 없습니다 (다른 월드입니다).")
+                                return@executes Command.SINGLE_SUCCESS
+                            }
+
+                            val destination = Location(w, tx, ty, tz)
+                            val path = try {
+                                api.getPath(origin, destination)
+                            } catch (ex: IllegalStateException) {
+                                sender.sendMessage("경로를 계산할 수 없습니다: ${ex.message}")
+                                return@executes Command.SINGLE_SUCCESS
+                            } catch (ex: IllegalArgumentException) {
+                                sender.sendMessage("경로를 계산할 수 없습니다: ${ex.message}")
+                                return@executes Command.SINGLE_SUCCESS
+                            }
 
                             if (path.isEmpty()) {
                                 sender.sendMessage("경로를 찾을 수 없습니다.")
                                 return@executes Command.SINGLE_SUCCESS
                             }
-                            val coords = path.map { p -> "(${p[0]}, ${p[1]}, ${p[2]})" }
+                            val coords = path.map { p -> "(${p.blockX}, ${p.blockY}, ${p.blockZ})" }
 
                             // 전체 좌표를 출력 (목적지까지 전부)
                             coords.chunked(6).forEach { chunk ->
@@ -157,7 +314,9 @@ class ARCRootFinding : ARCBukkitPlugin() {
                 }
 
                 val lines = snap.dumpAllNodes { _ -> }
+                
                 lines.forEach { line -> println(line) }
+                
                 return@executes Command.SINGLE_SUCCESS
             }
         )
