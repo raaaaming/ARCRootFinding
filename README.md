@@ -8,8 +8,24 @@
 
 ### Feature
 - 서버 로딩 중 노드 맵 및 간선 생성
+- 경로 탐색 API 제공
 - 길찾기 경로 출력 명령어
 - /apf find [x] [y] [z] : 목표 지점까지의 최적 경로를 제공합니다.
+- /apf path [x] [y] [z] : 목표 지점까지의 최적 경로 위에 파티클을 생성합니다.
+
+---
+
+### Usage
+(일반 사용)
+1. `plugins/` 폴더에 ARCCore와 ARCPathFinding 플러그인 추가
+2. 서버 실행 후, `plugins/ARCpathFinding/config.yml` 파일에서 세부사항 수정
+3. 콘솔에서 `/apf reload` 입력
+
+(API 사용)
+1. `plugins/` 폴더에 ARCCore와 ARCPathFinding 플러그인 추가
+2. `plugins/` 폴더에 ARCPathFinding을 이용하는 커스텀 플러그인 추가
+3. 서버 실행 후, `plugins/ARCpathFinding/config.yml` 파일에서 세부사항 수정
+4. 콘솔에서 `/apf reload` 입력
 
 ---
 
