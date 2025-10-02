@@ -1,5 +1,5 @@
-name: ARCPathFinding
-version: '1.0.0-SNAPSHOT'
+name: ARCRootFinding
+version: '1.0.0'
 main: kr.arcadia.arcPathFinding.ARCPathFinding
 api-version: '1.21'
 load: POSTWORLD
